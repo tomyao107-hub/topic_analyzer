@@ -1,0 +1,21 @@
+- [x] Tauri 桌面壳和现代前端工程骨架已建立
+- [x] 新前端包含导入、清洗、LDA、STM、对比和导出工作流入口
+- [x] 前端与 Python 计算层之间存在清晰的本地调用契约
+- [x] 清洗、LDA 和 STM 等耗时操作具备明确的忙碌、完成和失败反馈
+- [x] 现有 Python 数据处理、建模和导出业务逻辑可被复用且未改变核心语义
+- [x] 现有 PySide6 入口在迁移阶段仍保留为回退路径
+- [x] 已运行可用验证命令，环境阻塞已在 Task 6 中解除并通过 `npm run build`、`cargo check` 与 `.venv` 下 bridge 任务验证
+- [x] 新版 GUI 已清理迁移期文案和底部迁移标签，并使用正式程序 logo 图形替换左上角“史”
+- [x] 新版导入页已对照 PySide6 主要流程补齐元数据表、正文表、关联字段选择、字段识别结果和合并预览
+- [x] 已完成本次新版 GUI 修正后的前端构建、Python bridge 导入和编辑器诊断验证
+- [x] 已完成 release 同步构建验证，`topic-analyzer-desktop.exe` 更新至 2026/7/4 22:45:55，大小 10,718,208 字节
+- [x] release exe 调用 Python bridge 时优先使用项目 `.venv\Scripts\python.exe`，修复 `No module named 'pandas'`，重新构建后 exe 更新至 2026/7/4 23:26:53，大小 10,807,296 字节
+
+## 2026-07-10 接手后待办清单
+- [x] 稳定测试入口：补齐 `pytest` 运行方式，修复 `build_topic_summary` 排序契约不一致，并清理 `clean_service.py` 正则告警。已于 2026-07-10 验证 Python 编译、pytest、桌面端构建和 Tauri Rust 检查。
+- [x] 修复 Tauri/Python 会话链路：避免每次任务调用重置状态后回退到内置样例数据，保证真实文件能贯穿导入、清洗、LDA、对比和导出。已于 2026-07-10 用临时真实 CSV 覆盖跨 bridge 进程的导入、清洗、LDA 和导出回归。
+- [ ] 扩展 bridge 结果查询能力：实现分页表格预览、清洗预览、LDA/STM 结果查询、对比摘要和导出项列表。
+- [ ] 将 Tauri 页面接入真实结果：导入、清洗、LDA、STM、对比和导出页面不再依赖固定演示内容。
+- [ ] 下沉对比与导出业务逻辑，减少 PySide6 页面和 Tauri bridge 双实现造成的结果口径分叉。
+- [ ] 使用真实报刊样例数据做 PySide6 与 Tauri 新旧流程一致性验收。
+- [ ] 明确 release 分发形态：当前 release exe 依赖项目 `.venv`，后续需决定是否打包 Python runtime 或 sidecar。
