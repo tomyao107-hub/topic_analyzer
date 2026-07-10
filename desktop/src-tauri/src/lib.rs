@@ -7,6 +7,32 @@ use tauri::State;
 #[derive(Default)]
 struct WorkflowSession(Mutex<Value>);
 
+#[tauri::command]
+fn select_import_file() -> Option<String> {
+    rfd::FileDialog::new()
+        .set_title("选择数据表")
+        .add_filter("数据表", &["csv", "xlsx", "xls"])
+        .pick_file()
+        .map(|path| path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+fn select_dictionary_file() -> Option<String> {
+    rfd::FileDialog::new()
+        .set_title("选择自定义词典")
+        .add_filter("文本词典", &["txt"])
+        .pick_file()
+        .map(|path| path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+fn select_output_directory() -> Option<String> {
+    rfd::FileDialog::new()
+        .set_title("选择输出目录")
+        .pick_folder()
+        .map(|path| path.to_string_lossy().to_string())
+}
+
 fn merge_payload(base: &mut Value, update: &Value) {
     match (base, update) {
         (Value::Object(base_map), Value::Object(update_map)) => {
@@ -79,7 +105,12 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .manage(WorkflowSession::default())
-        .invoke_handler(tauri::generate_handler![run_python_task])
+        .invoke_handler(tauri::generate_handler![
+            run_python_task,
+            select_import_file,
+            select_dictionary_file,
+            select_output_directory
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

@@ -5,6 +5,7 @@ import math
 import os
 import sys
 import tempfile
+from collections import Counter
 from typing import Any, Dict, List
 
 import pandas as pd
@@ -14,8 +15,8 @@ from services.clean_service import CleanOptions, get_default_stopwords, tokenize
 from services.compare_service import build_compare_summary, representative_articles
 from services.data_service import detect_meta_columns, detect_text_columns, load_file, merge_tables
 from services.export_service import list_export_items
-from services.lda_service import build_corpus, compute_coherence, get_doc_topics, get_topics, save_lda_results, train_lda
-from services.stm_service import _analyze_stm_column, check_r_environment
+from services.lda_service import build_corpus, compute_coherence, get_doc_topics, get_topics, train_lda
+from services.stm_service import _analyze_stm_column, check_r_environment, train_stm
 
 
 SESSION_PAYLOAD_KEYS = (
@@ -32,6 +33,16 @@ SESSION_PAYLOAD_KEYS = (
     "randomState",
     "minDocFreq",
     "maxDocFreqRatio",
+    "prevalenceFormula",
+    "contentCovariate",
+    "maxEmIterations",
+    "model",
+    "axisField",
+    "representativeLimit",
+    "chartType",
+    "exportItems",
+    "ldaConfig",
+    "stmConfig",
     "outputDir",
     "projectName",
 )
@@ -181,9 +192,20 @@ def _ensure_clean(payload: Dict[str, Any]) -> Dict[str, Any]:
     _ensure_import(payload)
     options = _clean_options(payload)
     stopwords = set(payload.get("stopwords") or []) or get_default_stopwords()
-    texts = state.merged_df["text"].fillna("").astype(str).tolist()
+    work_df = state.merged_df.copy()
+    if options.remove_duplicates:
+        work_df = work_df.drop_duplicates(subset=["text"], keep="first").reset_index(drop=True)
+    texts = work_df["text"].fillna("").astype(str).tolist()
     tokens_list, stats = tokenize_texts(texts, options, stopwords, payload.get("customDictPath"))
-    cleaned_df = state.merged_df.copy()
+    if options.min_token_freq > 1:
+        frequencies = Counter(word for tokens in tokens_list for word in tokens)
+        tokens_list = [
+            [word for word in tokens if frequencies[word] >= options.min_token_freq]
+            for tokens in tokens_list
+        ]
+        stats["total_tokens"] = sum(len(tokens) for tokens in tokens_list)
+        stats["unique_words"] = len({word for tokens in tokens_list for word in tokens})
+    cleaned_df = work_df.copy()
     cleaned_df["tokens"] = [" ".join(tokens) for tokens in tokens_list]
     if options.remove_empty:
         keep = [len(tokens) > 0 for tokens in tokens_list]
@@ -204,18 +226,19 @@ def _ensure_clean(payload: Dict[str, Any]) -> Dict[str, Any]:
 def _run_lda(payload: Dict[str, Any]) -> Dict[str, Any]:
     state = get_state()
     _ensure_clean(payload)
+    values = payload.get("ldaConfig") or payload
     dictionary, corpus, filtered_tokens = build_corpus(
         state.tokens_list,
-        min_doc_freq=int(payload.get("minDocFreq", 1)),
-        max_doc_freq_ratio=float(payload.get("maxDocFreqRatio", 0.95)),
+        min_doc_freq=int(values.get("minDocFreq", 1)),
+        max_doc_freq_ratio=float(values.get("maxDocFreqRatio", 0.95)),
     )
     model = train_lda(
         corpus,
         dictionary,
-        num_topics=int(payload.get("numTopics", 3)),
-        passes=int(payload.get("passes", 2)),
-        iterations=int(payload.get("iterations", 40)),
-        random_state=int(payload.get("randomState", 42)),
+        num_topics=int(values.get("numTopics", 3)),
+        passes=int(values.get("passes", 2)),
+        iterations=int(values.get("iterations", 40)),
+        random_state=int(values.get("randomState", 42)),
     )
     topics = get_topics(model, n_words=8)
     coherence = compute_coherence(model, corpus, dictionary, filtered_tokens)
@@ -241,11 +264,37 @@ def _run_stm_check() -> Dict[str, Any]:
     return {"available": ok, "message": message}
 
 
+def _run_stm(payload: Dict[str, Any]) -> Dict[str, Any]:
+    state = get_state()
+    _ensure_clean(payload)
+    values = payload.get("stmConfig") or payload
+    r_model, topics, doc_topics, prevalence = train_stm(
+        state.cleaned_df,
+        state.tokens_list,
+        num_topics=int(values.get("numTopics", 10)),
+        prevalence_formula=str(values.get("prevalenceFormula") or "~ newspaper"),
+        content_covariate=str(values.get("contentCovariate") or "").strip() or None,
+        seed=int(values.get("randomState", 42)),
+        max_em_its=int(values.get("maxEmIterations", 75)),
+    )
+    state.stm_result = r_model
+    state.stm_topics = topics
+    state.stm_doc_topics = doc_topics
+    state.stm_prevalence = prevalence
+    state.r_available = True
+    state.step_stm_done = True
+    return {"topicCount": len(topics), "documents": len(doc_topics)}
+
+
 def _run_compare(payload: Dict[str, Any]) -> Dict[str, Any]:
     state = get_state()
-    if state.lda_doc_topics is None:
+    if str(payload.get("model") or "lda").lower() == "stm":
+        if state.stm_doc_topics is None:
+            _run_stm(payload)
+        doc_topics = state.stm_doc_topics
+    else:
         _run_lda(payload)
-    doc_topics = state.lda_doc_topics
+        doc_topics = state.lda_doc_topics
     rows = 0 if doc_topics is None else len(doc_topics)
     groups = [] if doc_topics is None or "newspaper" not in doc_topics else sorted(doc_topics["newspaper"].dropna().astype(str).unique().tolist())
     return {"rows": rows, "groups": groups, "representativeArticles": min(rows, 3)}
@@ -253,8 +302,23 @@ def _run_compare(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 def _run_export(payload: Dict[str, Any]) -> Dict[str, Any]:
     state = get_state()
-    if state.lda_topics is None:
+    default_items = {
+        "merged_data", "cleaned_records", "cleaned_corpus",
+        "lda_topic_word", "lda_doc_topic", "lda_coherence",
+        "session_config",
+    }
+    requested = payload.get("exportItems")
+    selected = default_items if requested is None else {str(item) for item in requested}
+    if not selected:
+        raise ValueError("请至少选择一个导出项目")
+
+    _ensure_import(payload)
+    if selected & {"cleaned_records", "cleaned_corpus"}:
+        _ensure_clean(payload)
+    if selected & {"lda_topic_word", "lda_doc_topic", "lda_coherence"}:
         _run_lda(payload)
+    if selected & {"stm_topic_word", "stm_doc_topic", "stm_prevalence"}:
+        _run_stm(payload)
 
     output_dir = payload.get("outputDir") or os.path.join(tempfile.gettempdir(), "topic-analyzer-output")
     project_name = payload.get("projectName") or state.project_name
@@ -263,23 +327,48 @@ def _run_export(payload: Dict[str, Any]) -> Dict[str, Any]:
     state.project_name = project_name
     exported: List[str] = []
 
-    if state.merged_df is not None:
+    if "merged_data" in selected and state.merged_df is not None:
         state.merged_df.to_csv(os.path.join(output_dir, "merged_data.csv"), index=False, encoding="utf-8-sig")
         exported.append("merged_data.csv")
-    if state.cleaned_df is not None:
+    if "cleaned_records" in selected and state.cleaned_df is not None:
         state.cleaned_df.to_csv(os.path.join(output_dir, "cleaned_records.csv"), index=False, encoding="utf-8-sig")
         exported.append("cleaned_records.csv")
-    if state.tokens_list:
+    if "cleaned_corpus" in selected and state.tokens_list:
         with open(os.path.join(output_dir, "tokens_corpus.txt"), "w", encoding="utf-8") as f:
             for tokens in state.tokens_list:
                 f.write(" ".join(tokens) + "\n")
         exported.append("tokens_corpus.txt")
-    if state.lda_topics and state.lda_doc_topics is not None:
-        save_lda_results(state.lda_topics, state.lda_doc_topics, state.lda_coherence or 0, output_dir)
-        exported.extend(["lda_topic_word.csv", "lda_doc_topic.csv", "lda_coherence.json"])
-    with open(os.path.join(output_dir, "session_config.json"), "w", encoding="utf-8") as f:
-        json.dump(state.session_payload, f, ensure_ascii=False, indent=2)
-    exported.append("session_config.json")
+    if "lda_topic_word" in selected and state.lda_topics:
+        rows = []
+        for topic in state.lda_topics:
+            for rank, (word, probability) in enumerate(topic["words"], start=1):
+                rows.append({"topic_id": topic["topic_id"], "rank": rank, "word": word, "probability": round(probability, 6)})
+        pd.DataFrame(rows).to_csv(os.path.join(output_dir, "lda_topic_word.csv"), index=False, encoding="utf-8-sig")
+        exported.append("lda_topic_word.csv")
+    if "lda_doc_topic" in selected and state.lda_doc_topics is not None:
+        state.lda_doc_topics.to_csv(os.path.join(output_dir, "lda_doc_topic.csv"), index=False, encoding="utf-8-sig")
+        exported.append("lda_doc_topic.csv")
+    if "lda_coherence" in selected and state.lda_coherence is not None:
+        with open(os.path.join(output_dir, "lda_coherence.json"), "w", encoding="utf-8") as f:
+            json.dump({"coherence_c_v": state.lda_coherence}, f, ensure_ascii=False, indent=2)
+        exported.append("lda_coherence.json")
+    if "stm_topic_word" in selected and state.stm_topics:
+        rows = []
+        for topic in state.stm_topics:
+            for rank, (word, _) in enumerate(topic["words"], start=1):
+                rows.append({"topic_id": topic["topic_id"], "rank": rank, "word": word})
+        pd.DataFrame(rows).to_csv(os.path.join(output_dir, "stm_topic_word.csv"), index=False, encoding="utf-8-sig")
+        exported.append("stm_topic_word.csv")
+    if "stm_doc_topic" in selected and state.stm_doc_topics is not None:
+        state.stm_doc_topics.to_csv(os.path.join(output_dir, "stm_doc_topic.csv"), index=False, encoding="utf-8-sig")
+        exported.append("stm_doc_topic.csv")
+    if "stm_prevalence" in selected and state.stm_prevalence is not None:
+        state.stm_prevalence.to_csv(os.path.join(output_dir, "stm_topic_prevalence.csv"), index=False, encoding="utf-8-sig")
+        exported.append("stm_topic_prevalence.csv")
+    if "session_config" in selected:
+        with open(os.path.join(output_dir, "session_config.json"), "w", encoding="utf-8") as f:
+            json.dump(state.session_payload, f, ensure_ascii=False, indent=2)
+        exported.append("session_config.json")
     return {"outputDir": output_dir, "exported": exported, "count": len(exported)}
 
 
@@ -364,12 +453,21 @@ def _stm_covariates(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _compare_summary(payload: Dict[str, Any]) -> Dict[str, Any]:
-    _run_lda(payload)
     state = get_state()
+    model = str(payload.get("model") or "lda").lower()
+    if model == "stm":
+        if state.stm_doc_topics is None:
+            _run_stm(payload)
+        doc_topics = state.stm_doc_topics
+    else:
+        _run_lda(payload)
+        doc_topics = state.lda_doc_topics
     axis_field = str(payload.get("axisField") or "newspaper")
-    summary = build_compare_summary(state.lda_doc_topics, axis_field)
+    summary = build_compare_summary(doc_topics, axis_field)
+    summary["model"] = model
+    summary["chartType"] = str(payload.get("chartType") or "line")
     summary["representativeArticles"] = representative_articles(
-        state.lda_doc_topics, int(payload.get("representativeLimit", 3))
+        doc_topics, int(payload.get("representativeLimit", 3))
     )
     return summary
 
@@ -397,7 +495,9 @@ def handle(command: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         data = _ensure_clean(payload)
     elif command in {"task.lda", "lda.train"}:
         data = _run_lda(payload)
-    elif command in {"task.stm", "stm.check_r", "stm.train"}:
+    elif command in {"task.stm", "stm.train"}:
+        data = _run_stm(payload)
+    elif command == "stm.check_r":
         data = _run_stm_check()
     elif command == "table.preview":
         data = _table_preview(payload)

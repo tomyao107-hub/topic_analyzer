@@ -80,3 +80,13 @@ def test_bridge_rebuilds_real_file_workflow_from_session_payload(tmp_path):
     assert session_config["metadataPath"] == str(metadata_path)
     assert session_config["options"]["minTextLength"] == 1
     assert session_config["numTopics"] == 2
+
+    selected_output_dir = tmp_path / "selected-export"
+    selected_export = _run_in_fresh_bridge("task.export", {
+        **lda["state"]["session"]["payload"],
+        "outputDir": str(selected_output_dir),
+        "exportItems": ["merged_data", "session_config"],
+    })
+    assert selected_export["ok"]
+    assert selected_export["data"]["exported"] == ["merged_data.csv", "session_config.json"]
+    assert not (selected_output_dir / "lda_doc_topic.csv").exists()

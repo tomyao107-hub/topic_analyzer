@@ -47,6 +47,60 @@ export type ImportConfig = {
   textIdField: string;
 };
 
+export type CleanConfig = {
+  removeEmpty: boolean;
+  removeDuplicates: boolean;
+  ocrClean: boolean;
+  removePunct: boolean;
+  removeNumbers: boolean;
+  traditionalToSimplified: boolean;
+  minTextLength: number;
+  minTokenFreq: number;
+  minDocFreq: number;
+  maxDocFreqRatio: number;
+  customDictPath: string;
+};
+
+export type LdaConfig = {
+  numTopics: number;
+  passes: number;
+  iterations: number;
+  randomState: number;
+  minDocFreq: number;
+  maxDocFreqRatio: number;
+};
+
+export type StmConfig = {
+  numTopics: number;
+  prevalenceFormula: string;
+  contentCovariate: string;
+  maxEmIterations: number;
+  randomState: number;
+};
+
+export type CompareConfig = {
+  model: "lda" | "stm";
+  axisField: string;
+  representativeLimit: number;
+  chartType: "line" | "bar";
+};
+
+export type ExportConfig = {
+  projectName: string;
+  outputDir: string;
+  items: string[];
+};
+
+export type WorkflowConfigs = {
+  clean: CleanConfig;
+  lda: LdaConfig;
+  stm: StmConfig;
+  compare: CompareConfig;
+  export: ExportConfig;
+};
+
+export type ConfigTaskKey = keyof WorkflowConfigs;
+
 type WorkflowState = {
   activeRoute: RouteKey;
   projectName: string;
@@ -54,9 +108,13 @@ type WorkflowState = {
   workflow: WorkflowFlags;
   summary: WorkflowSummary;
   importConfig: ImportConfig;
+  configs: WorkflowConfigs;
   tasks: Record<TaskKey, TaskState>;
   setActiveRoute: (route: RouteKey) => void;
   setImportConfig: (values: Partial<ImportConfig>) => void;
+  setTaskConfig: <K extends ConfigTaskKey>(task: K, values: Partial<WorkflowConfigs[K]>) => void;
+  chooseImportFile: (role: "metadata" | "text") => Promise<void>;
+  chooseConfigPath: (target: "customDict" | "outputDir") => Promise<void>;
   runBackendTask: (task: TaskKey) => Promise<void>;
   failBackendTask: (task: TaskKey) => void;
 };
@@ -186,29 +244,36 @@ const backendPayload = (task: TaskKey, state: WorkflowState) => {
   }
 
   if (task === "export") {
-    return session;
+    return {
+      projectName: state.configs.export.projectName.trim() || "未命名项目",
+      outputDir: state.configs.export.outputDir.trim(),
+      exportItems: state.configs.export.items,
+      options: state.configs.clean,
+      customDictPath: state.configs.clean.customDictPath.trim() || undefined,
+      ldaConfig: state.configs.lda,
+      stmConfig: state.configs.stm
+    };
   }
 
   if (task === "lda") {
-    return { ...session, numTopics: 3, passes: 2, iterations: 40, minDocFreq: 1, maxDocFreqRatio: 0.95 };
+    return { ...session, ...state.configs.lda };
   }
 
   if (task === "clean") {
     return {
       ...session,
-      options: {
-        removeEmpty: true,
-        removeDuplicates: true,
-        ocrClean: true,
-        removePunct: true,
-        removeNumbers: true,
-        traditionalToSimplified: false,
-        minTextLength: 2,
-        minTokenFreq: 1,
-        minDocFreq: 1,
-        maxDocFreqRatio: 0.95
-      }
+      options: state.configs.clean,
+      customDictPath: state.configs.clean.customDictPath.trim() || undefined
     };
+  }
+
+  if (task === "stm") {
+    return { ...session, ...state.configs.stm };
+  }
+
+  if (task === "compare") {
+    const modelConfig = state.configs.compare.model === "stm" ? state.configs.stm : state.configs.lda;
+    return { ...session, ...modelConfig, ...state.configs.compare };
   }
 
   return session;
@@ -231,11 +296,15 @@ const taskSummary = (task: TaskKey, response: BackendResponse) => {
   }
 
   if (task === "stm") {
-    return String(data.message ?? `STM 环境检查完成，可用状态：${Boolean(data.available)}`);
+    return `已完成 ${data.topicCount ?? summary?.stmTopics ?? 0} 个 STM 主题，覆盖 ${data.documents ?? 0} 篇文档`;
   }
 
   if (task === "compare") {
-    return `已生成 ${data.rows ?? 0} 行对比数据，覆盖 ${(data.groups as string[] | undefined)?.length ?? 0} 个分组`;
+    const rows = Array.isArray(data.rows) ? data.rows.length : Number(data.rows ?? 0);
+    const topics = data.representativeArticles && typeof data.representativeArticles === "object"
+      ? Object.keys(data.representativeArticles).length
+      : 0;
+    return `已生成 ${rows} 行对比数据，包含 ${topics} 个主题的代表文章`;
   }
 
   return `已导出 ${summary?.exportFiles ?? 0} 个结果文件`;
@@ -289,9 +358,77 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
     metadataIdField: "doc_id",
     textIdField: "doc_id"
   },
+  configs: {
+    clean: {
+      removeEmpty: true,
+      removeDuplicates: true,
+      ocrClean: true,
+      removePunct: true,
+      removeNumbers: true,
+      traditionalToSimplified: false,
+      minTextLength: 10,
+      minTokenFreq: 1,
+      minDocFreq: 2,
+      maxDocFreqRatio: 0.95,
+      customDictPath: ""
+    },
+    lda: {
+      numTopics: 10,
+      passes: 20,
+      iterations: 400,
+      randomState: 42,
+      minDocFreq: 2,
+      maxDocFreqRatio: 0.95
+    },
+    stm: {
+      numTopics: 10,
+      prevalenceFormula: "~ newspaper + s(pub_year)",
+      contentCovariate: "genre",
+      maxEmIterations: 75,
+      randomState: 42
+    },
+    compare: {
+      model: "lda",
+      axisField: "newspaper",
+      representativeLimit: 3,
+      chartType: "line"
+    },
+    export: {
+      projectName: "未命名项目",
+      outputDir: "E:/topic-analyzer/output",
+      items: ["merged_data", "cleaned_records", "cleaned_corpus", "lda_topic_word", "lda_doc_topic", "lda_coherence", "session_config"]
+    }
+  },
   tasks: initialTasks,
   setActiveRoute: (route) => set({ activeRoute: route }),
   setImportConfig: (values) => set((state) => ({ importConfig: { ...state.importConfig, ...values } })),
+  setTaskConfig: (task, values) => set((state) => ({
+    configs: { ...state.configs, [task]: { ...state.configs[task], ...values } }
+  } as Partial<WorkflowState>)),
+  chooseImportFile: async (role) => {
+    const path = await invoke<string | null>("select_import_file");
+    if (path) {
+      set((state) => ({
+        importConfig: {
+          ...state.importConfig,
+          [role === "metadata" ? "metadataPath" : "textPath"]: path
+        }
+      }));
+    }
+  },
+  chooseConfigPath: async (target) => {
+    const command = target === "outputDir" ? "select_output_directory" : "select_dictionary_file";
+    const path = await invoke<string | null>(command);
+    if (!path) return;
+    set((state) => target === "outputDir"
+      ? {
+          outputDir: path,
+          configs: { ...state.configs, export: { ...state.configs.export, outputDir: path } }
+        }
+      : {
+          configs: { ...state.configs, clean: { ...state.configs.clean, customDictPath: path } }
+        });
+  },
   runBackendTask: async (task) => {
     const plan = taskPlans[task];
     set((state) => ({

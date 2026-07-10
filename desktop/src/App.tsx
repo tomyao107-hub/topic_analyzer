@@ -22,7 +22,15 @@ import {
 } from "lucide-react";
 import type { ReactNode } from "react";
 import { routes, routeLabels } from "./routes";
-import { useWorkflowStore, type ImportConfig, type RouteKey, type TaskKey, type TaskState } from "./state/workflowStore";
+import {
+  useWorkflowStore,
+  type ConfigTaskKey,
+  type ImportConfig,
+  type RouteKey,
+  type TaskKey,
+  type TaskState,
+  type WorkflowConfigs
+} from "./state/workflowStore";
 
 type PageCopy = {
   title: string;
@@ -210,13 +218,15 @@ type WorkflowSummary = ReturnType<typeof useWorkflowStore.getState>["summary"];
 type PageDefinition = {
   task: TaskKey;
   primaryAction: string;
-  controls: Array<{ label: string; value: string }>;
   cards: Array<{ title: string; icon: ReactNode; body: (summary: WorkflowSummary) => string }>;
 };
 
 function WorkflowPage({ route, task, summary, workflow, importConfig, onImportConfigChange, onRun, onFail }: { route: WorkflowRouteKey; task: TaskState; summary: WorkflowSummary; workflow: ReturnType<typeof useWorkflowStore.getState>["workflow"]; importConfig: ImportConfig; onImportConfigChange: (values: Partial<ImportConfig>) => void; onRun: (task: TaskKey) => void; onFail: (task: TaskKey) => void }) {
   const config = pageDefinitions[route];
   const disabled = !canRun(route, workflow) || task.status === "running";
+  const configs = useWorkflowStore((state) => state.configs);
+  const setTaskConfig = useWorkflowStore((state) => state.setTaskConfig);
+  const chooseConfigPath = useWorkflowStore((state) => state.chooseConfigPath);
 
   if (route === "import") {
     return <ImportWorkflowPage task={task} summary={summary} importConfig={importConfig} onImportConfigChange={onImportConfigChange} onRun={onRun} onFail={onFail} />;
@@ -227,9 +237,7 @@ function WorkflowPage({ route, task, summary, workflow, importConfig, onImportCo
       <section className="action-layout">
         <article className="control-panel">
           <div className="panel-title"><Settings2 size={18} />主操作</div>
-          <div className="control-list">
-            {config.controls.map((item) => <ControlRow key={item.label} label={item.label} value={item.value} />)}
-          </div>
+          <ParameterEditor route={route as ConfigTaskKey} configs={configs} onChange={setTaskConfig} onChoosePath={chooseConfigPath} />
           <div className="button-row">
             <button className="primary-button" type="button" disabled={disabled} onClick={() => onRun(config.task)}>
               {task.status === "running" ? <RefreshCw size={17} /> : <Play size={17} />}
@@ -260,6 +268,7 @@ function WorkflowPage({ route, task, summary, workflow, importConfig, onImportCo
 function ImportWorkflowPage({ task, summary, importConfig, onImportConfigChange, onRun, onFail }: { task: TaskState; summary: WorkflowSummary; importConfig: ImportConfig; onImportConfigChange: (values: Partial<ImportConfig>) => void; onRun: (task: TaskKey) => void; onFail: (task: TaskKey) => void }) {
   const disabled = task.status === "running";
   const sampleMode = !importConfig.metadataPath.trim() || !importConfig.textPath.trim();
+  const chooseImportFile = useWorkflowStore((state) => state.chooseImportFile);
 
   return (
     <div className="page-stack">
@@ -274,6 +283,7 @@ function ImportWorkflowPage({ task, summary, importConfig, onImportConfigChange,
               placeholder="E:/data/metadata.xlsx"
               fields="文档编号、报刊名、出版日期、标题、文类"
               onChange={(metadataPath) => onImportConfigChange({ metadataPath })}
+              onBrowse={() => chooseImportFile("metadata")}
             />
             <TableSourceCard
               title="正文表"
@@ -282,6 +292,7 @@ function ImportWorkflowPage({ task, summary, importConfig, onImportConfigChange,
               placeholder="E:/data/full_text.csv"
               fields="文档编号、正文文本"
               onChange={(textPath) => onImportConfigChange({ textPath })}
+              onBrowse={() => chooseImportFile("text")}
             />
           </div>
           <div className="field-selector-grid" aria-label="关联字段选择">
@@ -327,13 +338,16 @@ function ImportWorkflowPage({ task, summary, importConfig, onImportConfigChange,
   );
 }
 
-function TableSourceCard({ title, icon, value, placeholder, fields, onChange }: { title: string; icon: ReactNode; value: string; placeholder: string; fields: string; onChange: (value: string) => void }) {
+function TableSourceCard({ title, icon, value, placeholder, fields, onChange, onBrowse }: { title: string; icon: ReactNode; value: string; placeholder: string; fields: string; onChange: (value: string) => void; onBrowse: () => void }) {
   return (
-    <label className="table-source-card">
+    <div className="table-source-card">
       <span className="source-heading">{icon}<strong>{title}</strong></span>
       <span className="source-fields">{fields}</span>
-      <input value={value} placeholder={placeholder} onChange={(event) => onChange(event.target.value)} />
-    </label>
+      <div className="path-input-row">
+        <input aria-label={`${title}文件路径`} value={value} placeholder={placeholder} onChange={(event) => onChange(event.target.value)} />
+        <button className="browse-button" type="button" onClick={onBrowse}><FolderOpen size={16} />选择文件</button>
+      </div>
+    </div>
   );
 }
 
@@ -386,15 +400,167 @@ function ImportPreviewPanel({ summary }: { summary: WorkflowSummary }) {
   );
 }
 
+type ParameterEditorProps = {
+  route: ConfigTaskKey;
+  configs: WorkflowConfigs;
+  onChange: <K extends ConfigTaskKey>(task: K, values: Partial<WorkflowConfigs[K]>) => void;
+  onChoosePath: (target: "customDict" | "outputDir") => Promise<void>;
+};
+
+const exportOptions = [
+  ["merged_data", "合并后的主数据集"],
+  ["cleaned_records", "清洗后的记录"],
+  ["cleaned_corpus", "分词结果语料"],
+  ["lda_topic_word", "LDA 主题词"],
+  ["lda_doc_topic", "LDA 文档主题分布"],
+  ["lda_coherence", "LDA 一致性指标"],
+  ["stm_topic_word", "STM 主题词"],
+  ["stm_doc_topic", "STM 文档主题分布"],
+  ["stm_prevalence", "STM prevalence"],
+  ["session_config", "会话配置"]
+] as const;
+
+function ParameterEditor({ route, configs, onChange, onChoosePath }: ParameterEditorProps) {
+  if (route === "clean") {
+    const values = configs.clean;
+    return (
+      <div className="parameter-form">
+        <div className="toggle-grid">
+          <ToggleField label="去除空文本" checked={values.removeEmpty} onChange={(removeEmpty) => onChange("clean", { removeEmpty })} />
+          <ToggleField label="去除重复文章" checked={values.removeDuplicates} onChange={(removeDuplicates) => onChange("clean", { removeDuplicates })} />
+          <ToggleField label="OCR 噪声清理" checked={values.ocrClean} onChange={(ocrClean) => onChange("clean", { ocrClean })} />
+          <ToggleField label="去除标点" checked={values.removePunct} onChange={(removePunct) => onChange("clean", { removePunct })} />
+          <ToggleField label="去除数字" checked={values.removeNumbers} onChange={(removeNumbers) => onChange("clean", { removeNumbers })} />
+          <ToggleField label="繁体转简体" checked={values.traditionalToSimplified} onChange={(traditionalToSimplified) => onChange("clean", { traditionalToSimplified })} />
+        </div>
+        <div className="parameter-grid">
+          <NumberField label="最短文本长度" value={values.minTextLength} min={1} max={500} onChange={(minTextLength) => onChange("clean", { minTextLength })} />
+          <NumberField label="最小词频" value={values.minTokenFreq} min={1} max={100} onChange={(minTokenFreq) => onChange("clean", { minTokenFreq })} />
+          <NumberField label="最小文档频率" value={values.minDocFreq} min={1} max={100} onChange={(minDocFreq) => onChange("clean", { minDocFreq })} />
+          <NumberField label="最大文档频率比例" value={values.maxDocFreqRatio} min={0.01} max={1} step={0.05} onChange={(maxDocFreqRatio) => onChange("clean", { maxDocFreqRatio })} />
+        </div>
+        <PathField label="自定义词典（可选）" value={values.customDictPath} placeholder="选择 .txt 词典文件" onChange={(customDictPath) => onChange("clean", { customDictPath })} onBrowse={() => onChoosePath("customDict")} buttonLabel="选择词典" />
+      </div>
+    );
+  }
+
+  if (route === "lda") {
+    const values = configs.lda;
+    return (
+      <div className="parameter-form parameter-grid">
+        <NumberField label="主题数" value={values.numTopics} min={2} max={100} onChange={(numTopics) => onChange("lda", { numTopics })} />
+        <NumberField label="训练轮数 (passes)" value={values.passes} min={1} max={500} onChange={(passes) => onChange("lda", { passes })} />
+        <NumberField label="单轮迭代数" value={values.iterations} min={10} max={2000} onChange={(iterations) => onChange("lda", { iterations })} />
+        <NumberField label="随机种子" value={values.randomState} min={0} max={999999} onChange={(randomState) => onChange("lda", { randomState })} />
+        <NumberField label="最小文档频率" value={values.minDocFreq} min={1} max={100} onChange={(minDocFreq) => onChange("lda", { minDocFreq })} />
+        <NumberField label="最大文档频率比例" value={values.maxDocFreqRatio} min={0.01} max={1} step={0.05} onChange={(maxDocFreqRatio) => onChange("lda", { maxDocFreqRatio })} />
+      </div>
+    );
+  }
+
+  if (route === "stm") {
+    const values = configs.stm;
+    return (
+      <div className="parameter-form parameter-grid">
+        <NumberField label="主题数" value={values.numTopics} min={2} max={100} onChange={(numTopics) => onChange("stm", { numTopics })} />
+        <NumberField label="最大 EM 迭代" value={values.maxEmIterations} min={10} max={500} onChange={(maxEmIterations) => onChange("stm", { maxEmIterations })} />
+        <NumberField label="随机种子" value={values.randomState} min={0} max={999999} onChange={(randomState) => onChange("stm", { randomState })} />
+        <TextField label="prevalence 公式" value={values.prevalenceFormula} placeholder="~ newspaper + s(pub_year)" onChange={(prevalenceFormula) => onChange("stm", { prevalenceFormula })} />
+        <TextField label="content 协变量（可选）" value={values.contentCovariate} placeholder="genre" onChange={(contentCovariate) => onChange("stm", { contentCovariate })} />
+      </div>
+    );
+  }
+
+  if (route === "compare") {
+    const values = configs.compare;
+    return (
+      <div className="parameter-form parameter-grid">
+        <SelectField label="主题模型" value={values.model} options={[["lda", "LDA"], ["stm", "STM"]]} onChange={(model) => onChange("compare", { model: model as "lda" | "stm" })} />
+        <SelectField label="聚合维度" value={values.axisField} options={[["newspaper", "报刊"], ["pub_year", "年份"], ["pub_month", "月份"], ["genre", "文类"], ["time_index", "时间索引"]]} onChange={(axisField) => onChange("compare", { axisField })} />
+        <SelectField label="图表类型" value={values.chartType} options={[["line", "趋势线"], ["bar", "柱状图"]]} onChange={(chartType) => onChange("compare", { chartType: chartType as "line" | "bar" })} />
+        <NumberField label="每主题代表文章数" value={values.representativeLimit} min={1} max={20} onChange={(representativeLimit) => onChange("compare", { representativeLimit })} />
+      </div>
+    );
+  }
+
+  const values = configs.export;
+  const toggleItem = (key: string, checked: boolean) => {
+    const items = checked ? [...new Set([...values.items, key])] : values.items.filter((item) => item !== key);
+    onChange("export", { items });
+  };
+  return (
+    <div className="parameter-form">
+      <div className="parameter-grid">
+        <TextField label="项目名称" value={values.projectName} placeholder="报刊主题分析项目" onChange={(projectName) => onChange("export", { projectName })} />
+        <PathField label="输出目录" value={values.outputDir} placeholder="选择导出目录" onChange={(outputDir) => onChange("export", { outputDir })} onBrowse={() => onChoosePath("outputDir")} buttonLabel="选择目录" />
+      </div>
+      <fieldset className="export-options">
+        <legend>导出项目</legend>
+        <div className="toggle-grid">
+          {exportOptions.map(([key, label]) => <ToggleField key={key} label={label} checked={values.items.includes(key)} onChange={(checked) => toggleItem(key, checked)} />)}
+        </div>
+      </fieldset>
+    </div>
+  );
+}
+
+function NumberField({ label, value, min, max, step = 1, onChange }: { label: string; value: number; min: number; max: number; step?: number; onChange: (value: number) => void }) {
+  return (
+    <label className="parameter-field">
+      <span>{label}</span>
+      <input type="number" value={value} min={min} max={max} step={step} onChange={(event) => {
+        const next = Number(event.target.value);
+        if (Number.isFinite(next)) onChange(Math.min(max, Math.max(min, next)));
+      }} />
+    </label>
+  );
+}
+
+function TextField({ label, value, placeholder, onChange }: { label: string; value: string; placeholder: string; onChange: (value: string) => void }) {
+  return (
+    <label className="parameter-field">
+      <span>{label}</span>
+      <input type="text" value={value} placeholder={placeholder} onChange={(event) => onChange(event.target.value)} />
+    </label>
+  );
+}
+
+function SelectField({ label, value, options, onChange }: { label: string; value: string; options: ReadonlyArray<readonly [string, string]>; onChange: (value: string) => void }) {
+  return (
+    <label className="parameter-field">
+      <span>{label}</span>
+      <select value={value} onChange={(event) => onChange(event.target.value)}>
+        {options.map(([key, text]) => <option key={key} value={key}>{text}</option>)}
+      </select>
+    </label>
+  );
+}
+
+function ToggleField({ label, checked, onChange }: { label: string; checked: boolean; onChange: (checked: boolean) => void }) {
+  return (
+    <label className="toggle-field">
+      <input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} />
+      <span>{label}</span>
+    </label>
+  );
+}
+
+function PathField({ label, value, placeholder, buttonLabel, onChange, onBrowse }: { label: string; value: string; placeholder: string; buttonLabel: string; onChange: (value: string) => void; onBrowse: () => void }) {
+  return (
+    <div className="parameter-field path-field">
+      <span>{label}</span>
+      <span className="path-input-row">
+        <input aria-label={label} type="text" value={value} placeholder={placeholder} onChange={(event) => onChange(event.target.value)} />
+        <button className="browse-button" type="button" onClick={onBrowse}><FolderOpen size={16} />{buttonLabel}</button>
+      </span>
+    </div>
+  );
+}
+
 const pageDefinitions: Record<WorkflowRouteKey, PageDefinition> = {
   import: {
     task: "import",
     primaryAction: "识别字段并合并",
-    controls: [
-      { label: "元数据表", value: "metadata.xlsx" },
-      { label: "正文表", value: "full_text.csv" },
-      { label: "关联字段", value: "doc_id" }
-    ],
     cards: [
       { title: "文件摘要", icon: <FileInput size={18} />, body: (summary) => `元数据 ${summary.metadataRows} 行，正文 ${summary.textRows} 行。` },
       { title: "字段映射", icon: <Table2 size={18} />, body: () => "doc_id、article_title、newspaper、pub_year、genre 与 text 字段进入标准映射预览。" },
@@ -404,11 +570,6 @@ const pageDefinitions: Record<WorkflowRouteKey, PageDefinition> = {
   clean: {
     task: "clean",
     primaryAction: "启动清洗任务",
-    controls: [
-      { label: "基础清理", value: "OCR、标点、数字、繁简转换" },
-      { label: "文本长度", value: "最少 20 字" },
-      { label: "词频阈值", value: "min_freq 2 / min_doc_freq 2" }
-    ],
     cards: [
       { title: "清洗参数", icon: <Scissors size={18} />, body: () => "开关类参数与阈值分区展示，后续映射到 CleanOptionsPayload。" },
       { title: "样例预览", icon: <Table2 size={18} />, body: () => "同屏比较原文、清洗后文本和分词结果，便于调整停用词。" },
@@ -418,11 +579,6 @@ const pageDefinitions: Record<WorkflowRouteKey, PageDefinition> = {
   lda: {
     task: "lda",
     primaryAction: "训练 LDA",
-    controls: [
-      { label: "主题数", value: "12" },
-      { label: "训练轮数", value: "passes 20 / iterations 400" },
-      { label: "文类筛选", value: "全部文类" }
-    ],
     cards: [
       { title: "主题关键词", icon: <Layers3 size={18} />, body: (summary) => `当前 ${summary.ldaTopics} 个主题，展示每个主题前 10 个关键词。` },
       { title: "一致性指标", icon: <BarChart3 size={18} />, body: (summary) => `Coherence：${summary.ldaCoherence ?? "待训练"}。` },
@@ -432,11 +588,6 @@ const pageDefinitions: Record<WorkflowRouteKey, PageDefinition> = {
   stm: {
     task: "stm",
     primaryAction: "训练 STM",
-    controls: [
-      { label: "R 环境", value: "待 bridge 检查" },
-      { label: "prevalence", value: "~ newspaper + s(pub_year)" },
-      { label: "content", value: "genre" }
-    ],
     cards: [
       { title: "环境检查", icon: <Activity size={18} />, body: () => "展示 R、rpy2 与 stm 包可用性，并提供失败详情。" },
       { title: "协变量", icon: <Table2 size={18} />, body: () => "字段可用性、缺失值和低基数原因会集中展示。" },
@@ -446,11 +597,6 @@ const pageDefinitions: Record<WorkflowRouteKey, PageDefinition> = {
   compare: {
     task: "compare",
     primaryAction: "生成对比视图",
-    controls: [
-      { label: "模型", value: "自动选择 LDA / STM" },
-      { label: "维度", value: "报刊 x 年份" },
-      { label: "图表", value: "趋势线 + 聚合表" }
-    ],
     cards: [
       { title: "趋势图", icon: <BarChart3 size={18} />, body: () => "展示主题占比随报刊和年份变化的序列。" },
       { title: "聚合表", icon: <Table2 size={18} />, body: () => "保留模型、主题、维度、文章数和平均权重列。" },
@@ -460,11 +606,6 @@ const pageDefinitions: Record<WorkflowRouteKey, PageDefinition> = {
   export: {
     task: "export",
     primaryAction: "导出选中项目",
-    controls: [
-      { label: "输出目录", value: "E:/topic-analyzer/output" },
-      { label: "项目名", value: "未命名项目" },
-      { label: "导出项目", value: "合并数据、清洗语料、LDA、STM、日志" }
-    ],
     cards: [
       { title: "可导出项目", icon: <Download size={18} />, body: () => "按前置结果启用或禁用导出项，并展示缺失原因。" },
       { title: "结果摘要", icon: <CheckCircle2 size={18} />, body: (summary) => `已导出 ${summary.exportFiles} 个文件，部分失败会保留明细。` },
@@ -510,15 +651,6 @@ function TaskStatusPanel({ task }: { task: TaskState }) {
 function TaskBadge({ task }: { task: TaskState }) {
   const label = task.status === "running" ? "运行中" : task.status === "succeeded" ? "已完成" : task.status === "failed" ? "失败" : "待启动";
   return <span className={`task-badge ${task.status}`}>{label}</span>;
-}
-
-function ControlRow({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="control-row">
-      <span>{label}</span>
-      <strong>{value}</strong>
-    </div>
-  );
 }
 
 function Metric({ label, value }: { label: string; value: string | number }) {

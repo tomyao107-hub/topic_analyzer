@@ -387,6 +387,8 @@ h1 {
 }
 
 .table-source-card input,
+.parameter-field input,
+.parameter-field select,
 .field-selector-grid select {
   width: 100%;
   min-height: 38px;
@@ -399,6 +401,40 @@ h1 {
 
 .table-source-card input {
   padding: 8px 10px;
+}
+
+.path-input-row {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+  min-width: 0;
+}
+
+.path-input-row input {
+  flex: 1;
+  min-width: 0;
+}
+
+.browse-button {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 38px;
+  padding: 7px 11px;
+  border: 1px solid #aab7c7;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #26364a;
+  font-weight: 750;
+  cursor: pointer;
+}
+
+.browse-button:hover {
+  border-color: #24724a;
+  color: #24724a;
+  background: #f2f9f5;
 }
 
 .field-selector-grid {
@@ -482,33 +518,79 @@ h1 {
   font-size: 13px;
 }
 
-.control-list {
+.parameter-form {
   display: grid;
-  gap: 10px;
+  gap: 14px;
   margin-top: 16px;
 }
 
-.control-row {
+.parameter-grid,
+.toggle-grid {
+  display: grid;
+  gap: 10px 12px;
+}
+
+.parameter-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.toggle-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.parameter-field {
+  display: grid;
+  align-content: start;
+  gap: 7px;
+  min-width: 0;
+  color: #596779;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.parameter-field input,
+.parameter-field select {
+  min-width: 0;
+  padding: 8px 10px;
+}
+
+.path-field {
+  grid-column: 1 / -1;
+}
+
+.toggle-field {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  min-height: 44px;
-  padding: 10px 12px;
+  gap: 8px;
+  min-height: 38px;
+  padding: 8px 10px;
   border: 1px solid #e2e8f0;
   border-radius: 8px;
   background: #f8fafc;
+  color: #465366;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
 }
 
-.control-row span {
+.toggle-field input {
+  width: 16px;
+  height: 16px;
+  accent-color: #24724a;
+}
+
+.export-options {
+  margin: 0;
+  padding: 12px;
+  border: 1px solid #dce2ea;
+  border-radius: 8px;
+}
+
+.export-options legend {
+  padding: 0 6px;
   color: #596779;
   font-size: 13px;
-}
-
-.control-row strong {
-  color: #172033;
-  font-size: 13px;
-  text-align: right;
+  font-weight: 800;
 }
 
 .button-row {
@@ -669,6 +751,10 @@ h1 {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .toggle-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .action-layout,
   .import-layout {
     grid-template-columns: 1fr;
@@ -690,6 +776,17 @@ h1 {
   .import-result-grid,
   .import-summary-strip {
     grid-template-columns: 1fr;
+  }
+
+
+  .parameter-grid,
+  .toggle-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .path-input-row {
+    align-items: stretch;
+    flex-direction: column;
   }
 
   h1 {
