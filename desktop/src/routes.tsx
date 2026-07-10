@@ -10,11 +10,11 @@ export type AppRoute = {
 
 export const routes: AppRoute[] = [
   { key: "welcome", label: "总览", description: "项目状态与下一步", Icon: Home },
-  { key: "import", label: "导入", description: "元数据、正文与字段识别", Icon: FileInput },
-  { key: "clean", label: "清洗", description: "OCR 清理、分词与停用词", Icon: Scissors },
+  { key: "import", label: "导入", description: "单表字段识别与严格校验", Icon: FileInput },
+  { key: "clean", label: "清洗", description: "中英文清洗、分词与停用词", Icon: Scissors },
   { key: "lda", label: "LDA", description: "主题建模与一致性", Icon: Layers3 },
   { key: "stm", label: "STM", description: "协变量建模与 R 环境", Icon: Boxes },
-  { key: "compare", label: "对比", description: "报刊、年份、文类与主题差异", Icon: SplitSquareHorizontal },
+  { key: "compare", label: "对比", description: "动态历史元数据维度", Icon: SplitSquareHorizontal },
   { key: "export", label: "导出", description: "结果文件与处理日志", Icon: Download }
 ];
 

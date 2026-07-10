@@ -5,6 +5,40 @@
 from typing import Dict, Optional, Tuple
 import pandas as pd
 
+# ── v2 统一文献表字段 ──────────────────────────────────────────────────────────
+DOCUMENT_FIELD_MAP = {
+    "doc_id": ["doc_id", "文档编号", "文献编号", "docid", "id", "编号", "文章编号", "document_id"],
+    "text": ["text", "正文文本", "正文", "content", "full_text", "文本", "内容", "article_text"],
+    "language": ["language", "lang", "语言", "语种", "document_language"],
+    "title": ["title", "题名", "标题", "文献题名", "article_title", "文章标题", "文题"],
+    "creator": ["creator", "创建者", "作者/创建者", "author", "作者", "authors", "署名"],
+    "date": ["date", "日期", "文献日期", "pub_date", "出版日期", "publication_date", "出版时间", "刊期"],
+    "source_name": ["source_name", "来源", "来源名称", "newspaper", "报刊名", "报纸名", "刊名", "期刊名"],
+    "source_type": ["source_type", "来源类型", "文献类型", "document_type"],
+    "genre": ["genre", "文类", "体裁", "类别", "文章类别", "article_type", "type"],
+    "place": ["place", "地点", "地名", "location"],
+    "collection": ["collection", "汇集", "文集", "馆藏集", "collection_name"],
+    "repository": ["repository", "收藏机构", "馆藏机构", "档案馆", "repository_name"],
+    "volume": ["volume", "卷", "卷号", "vol"],
+    "issue": ["issue", "期", "期号", "issue_no", "vol_issue", "卷期", "卷期号"],
+    "page": ["page", "页码", "pages", "page_no", "页数"],
+    "notes": ["notes", "备注", "note", "remarks"],
+    "year": ["year", "年份", "日期年份", "pub_year", "出版年份", "出版年"],
+    "month": ["month", "月份", "日期月份", "pub_month", "出版月份", "出版月"],
+    "time_index": ["time_index", "时间序号", "连续月份", "月份序号", "month_index", "timeindex"],
+}
+
+DOCUMENT_FIELD_DISPLAY_NAMES = {
+    "doc_id": "文献编号", "text": "正文文本", "language": "语言", "title": "题名",
+    "creator": "作者/创建者", "date": "日期", "source_name": "来源",
+    "source_type": "来源类型", "genre": "文类", "place": "地点",
+    "collection": "文集/馆藏集", "repository": "收藏机构", "volume": "卷",
+    "issue": "期", "page": "页码", "notes": "备注", "year": "年份",
+    "month": "月份", "time_index": "时间序号",
+}
+
+REQUIRED_DOCUMENT = ["doc_id", "text", "language"]
+
 # ── 标准字段名 ─────────────────────────────────────────────────────────────────
 # 元数据表标准字段
 META_FIELD_MAP = {
@@ -153,6 +187,31 @@ def parse_date_column(df: pd.DataFrame) -> pd.DataFrame:
     except Exception:
         pass
 
+    return df
+
+
+def parse_document_date(df: pd.DataFrame) -> pd.DataFrame:
+    """解析 v2 文献日期，并在用户未提供时派生 year/month/time_index。"""
+    df = df.copy()
+    try:
+        if "date" in df.columns:
+            parsed = pd.to_datetime(df["date"], errors="coerce")
+            if "year" not in df.columns:
+                df["year"] = parsed.dt.year
+            if "month" not in df.columns:
+                df["month"] = parsed.dt.month
+        if "time_index" not in df.columns and "year" in df.columns and "month" in df.columns:
+            years = pd.to_numeric(df["year"], errors="coerce")
+            months = pd.to_numeric(df["month"], errors="coerce")
+            valid = years.notna() & months.notna() & months.between(1, 12)
+            df["time_index"] = pd.NA
+            if valid.any():
+                month_numbers = years[valid].astype(int) * 12 + months[valid].astype(int)
+                df.loc[valid, "time_index"] = (
+                    month_numbers - int(month_numbers.min()) + 1
+                ).astype("Int64")
+    except Exception:
+        pass
     return df
 
 

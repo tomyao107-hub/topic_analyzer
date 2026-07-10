@@ -1,11 +1,11 @@
 import json
-from datetime import datetime
 
 import pandas as pd
 import pytest
 
 import backend.bridge as bridge
 from models.app_state import get_state, reset_state
+from services.data_service import DocumentValidationError, load_documents
 
 
 @pytest.fixture(autouse=True)
@@ -15,211 +15,198 @@ def _reset_bridge_state():
     reset_state()
 
 
-def _write_real_tables(tmp_path):
-    metadata_path = tmp_path / "metadata.csv"
-    text_path = tmp_path / "text.csv"
-    pd.DataFrame([
-        {"文档编号": "001", "标题": "甲文", "报刊名": "申报", "出版日期": "1931-01-05", "文类": "新闻"},
-        {"文档编号": "002", "标题": "乙文", "报刊名": "大公报", "出版日期": "1932-03-12", "文类": "评论"},
-        {"文档编号": "003", "标题": "丙文", "报刊名": "申报", "出版日期": "1933-08-18", "文类": "新闻"},
-    ]).to_csv(metadata_path, index=False, encoding="utf-8")
-    pd.DataFrame([
-        {"文章编号": "001", "正文": "甲文 保留词 测试文本"},
-        {"文章编号": "002", "正文": "乙文 另一篇 测试文本"},
-        {"文章编号": "003", "正文": "丙文 第三篇 测试文本"},
-    ]).to_csv(text_path, index=False, encoding="utf-8")
-    return metadata_path, text_path
+def _document_rows():
+    return [
+        {"文献编号": "Z1", "题名": "市场与工厂", "来源": "申报", "日期": "1931-01-05", "语种": "中文", "正文": "市场 贸易 工厂 工人 生产 商品 价格", "研究分组": "城市"},
+        {"文献编号": "Z2", "题名": "学校新制", "来源": "大公报", "日期": "1932-03-12", "语种": "Chinese", "正文": "学校 教育 学生 课程 教师 新制 学习", "研究分组": "教育"},
+        {"文献编号": "Z3", "题名": "乡村建设", "来源": "民国日报", "日期": "1933-08-18", "语种": "zh-CN", "正文": "乡村 建设 农民 合作 水利 土地 农业", "研究分组": "乡村"},
+        {"文献编号": "E1", "题名": "Factory markets", "来源": "The Times", "日期": "1931-02-04", "语种": "英文", "正文": "The inter-\nnational markets preserved workers' histories.", "研究分组": "urban"},
+        {"文献编号": "E2", "题名": "School reform", "来源": "The Guardian", "日期": "1932-04-13", "语种": "English", "正文": "Schools and teachers discussed education reforms in public.", "研究分组": "education"},
+        {"文献编号": "E3", "题名": "Rural works", "来源": "Daily News", "日期": "1933-09-19", "语种": "en-GB", "正文": "Rural farmers built water works and cooperative markets.", "研究分组": "rural"},
+    ]
 
 
-def _import_payload(metadata_path, text_path, **extra):
+def _write_documents(tmp_path, suffix="csv"):
+    path = tmp_path / f"documents.{suffix}"
+    frame = pd.DataFrame(_document_rows())
+    if suffix == "xlsx":
+        frame.to_excel(path, index=False)
+    else:
+        frame.to_csv(path, index=False, encoding="utf-8")
+    return path
+
+
+def _payload(path, **extra):
     return {
-        "metadataPath": str(metadata_path),
-        "textPath": str(text_path),
-        "metadataIdField": "文档编号",
-        "textIdField": "文章编号",
+        "dataPath": str(path),
+        "fieldMapping": {"doc_id": "文献编号", "text": "正文", "language": "语种"},
         **extra,
     }
 
 
-def test_real_import_returns_detected_mappings_preview_and_genres(tmp_path):
-    metadata_path, text_path = _write_real_tables(tmp_path)
-
-    response = bridge.handle("task.import", _import_payload(metadata_path, text_path))
+@pytest.mark.parametrize("suffix", ["csv", "xlsx"])
+def test_single_table_import_normalizes_aliases_languages_dates_and_custom_fields(tmp_path, suffix):
+    path = _write_documents(tmp_path, suffix)
+    response = bridge.handle("task.import", _payload(path))
 
     assert response["ok"] is True
     data = response["data"]
-    assert data["metadataMapping"]["doc_id"] == "文档编号"
-    assert data["metadataMapping"]["article_title"] == "标题"
-    assert data["metadataMapping"]["genre"] == "文类"
-    assert data["textMapping"] == {"doc_id": "文章编号", "text": "正文"}
-    assert data["genres"] == sorted(["新闻", "评论"])
-
-    preview = data["preview"]
-    assert preview["table"] == "merged"
-    assert preview["total"] == 3
-    assert preview["pageSize"] == 10
-    assert [row["doc_id"] for row in preview["rows"]] == ["001", "002", "003"]
-    assert preview["rows"][0]["article_title"] == "甲文"
-    assert preview["rows"][0]["genre"] == "新闻"
-    assert preview["rows"][0]["text"] == "甲文 保留词 测试文本"
+    assert data["documentRows"] == 6
+    assert data["languageRows"] == {"zh": 3, "en": 3}
+    assert data["mapping"]["title"] == "题名"
+    assert data["mapping"]["source_name"] == "来源"
+    assert "研究分组" in data["unrecognizedColumns"]
+    first = data["preview"]["rows"][0]
+    assert first["title"] == "市场与工厂"
+    assert first["source_name"] == "申报"
+    assert first["language"] == "zh"
+    assert first["year"] == 1931
+    assert first["研究分组"] == "城市"
 
 
-def test_task_import_rejects_missing_real_file_paths(tmp_path):
-    metadata_path, _ = _write_real_tables(tmp_path)
+@pytest.mark.parametrize(
+    ("mutate", "issue_type", "expected_rows"),
+    [
+        (lambda rows: rows.__setitem__(1, {**rows[1], "文献编号": "Z1"}), "duplicate_doc_id", [2, 3]),
+        (lambda rows: rows.__setitem__(0, {**rows[0], "正文": ""}), "blank_required_value", [2]),
+        (lambda rows: rows.__setitem__(4, {**rows[4], "语种": "fr"}), "unsupported_language", [6]),
+    ],
+)
+def test_import_blocks_invalid_required_values_with_spreadsheet_rows(tmp_path, mutate, issue_type, expected_rows):
+    rows = _document_rows()
+    mutate(rows)
+    path = tmp_path / "invalid.csv"
+    pd.DataFrame(rows).to_csv(path, index=False, encoding="utf-8")
 
-    with pytest.raises(ValueError, match="未找到已导入的真实文件"):
-        bridge.handle("task.import", {})
+    with pytest.raises(DocumentValidationError) as caught:
+        load_documents(str(path), {"doc_id": "文献编号", "text": "正文", "language": "语种"})
 
-    with pytest.raises(ValueError, match="未找到已导入的真实文件"):
-        bridge.handle("task.import", {"metadataPath": str(metadata_path)})
+    issue = next(item for item in caught.value.issues if item["type"] == issue_type)
+    assert issue["rows"][: len(expected_rows)] == expected_rows
 
 
-def test_clean_result_has_parity_columns_and_allows_empty_stopwords(monkeypatch, tmp_path):
-    metadata_path, text_path = _write_real_tables(tmp_path)
-    captured = {}
+def test_import_blocks_missing_language_column(tmp_path):
+    path = tmp_path / "missing.csv"
+    pd.DataFrame(_document_rows()).drop(columns=["语种"]).to_csv(path, index=False, encoding="utf-8")
+    with pytest.raises(DocumentValidationError) as caught:
+        load_documents(str(path), {"doc_id": "文献编号", "text": "正文"})
+    assert caught.value.issues[0]["type"] == "missing_columns"
+    assert caught.value.issues[0]["columns"] == ["language"]
 
-    def fake_tokenize(texts, options, stopwords, custom_dict_path):
-        captured["texts"] = list(texts)
-        captured["stopwords"] = set(stopwords)
-        captured["custom_dict_path"] = custom_dict_path
-        tokens = [
-            ["甲文", "保留词", "测试文本"],
-            ["乙文", "另一篇", "测试文本"],
-            ["丙文", "第三篇", "测试文本"],
-        ]
-        return tokens, {
-            "total_docs": len(tokens),
-            "non_empty_docs": len(tokens),
-            "total_tokens": sum(len(row) for row in tokens),
-            "unique_words": len({word for row in tokens for word in row}),
-        }
 
-    monkeypatch.setattr(bridge, "tokenize_texts", fake_tokenize)
-    payload = _import_payload(
-        metadata_path,
-        text_path,
-        useDefaultStopwords=False,
-        stopwords=[],
-        options={
-            "removeEmpty": False,
+def test_language_aware_cleaning_preserves_original_and_reports_language_stats(tmp_path):
+    path = _write_documents(tmp_path)
+    response = bridge.handle("task.clean", _payload(
+        path,
+        cleanConfig={
+            "removeEmpty": True,
             "removeDuplicates": False,
-            "ocrClean": False,
-            "removePunct": False,
-            "removeNumbers": False,
-            "traditionalToSimplified": False,
+            "ocrClean": True,
+            "removePunct": True,
+            "removeNumbers": True,
             "minTextLength": 1,
             "minTokenFreq": 1,
-            "minDocFreq": 1,
-            "maxDocFreqRatio": 1.0,
+            "zh": {"useDefaultStopwords": True, "stopwords": [], "minTokenLength": 1},
+            "en": {"useDefaultStopwords": True, "stopwords": [], "minTokenLength": 2, "lowercase": True, "repairHyphenation": True},
         },
-    )
-
-    response = bridge.handle("task.clean", payload)
-
-    assert response["ok"] is True
-    assert captured["stopwords"] == set()
-    assert response["data"]["stopwordCount"] == 0
-    assert response["state"]["session"]["payload"]["useDefaultStopwords"] is False
-    assert response["state"]["session"]["payload"]["stopwords"] == []
-
-    preview = response["data"]["preview"]
-    assert {"cleaned_text", "tokens", "token_count"}.issubset(preview["columns"])
-    assert [row["cleaned_text"] for row in preview["rows"]] == captured["texts"]
-    assert preview["rows"][0]["tokens"] == "甲文 保留词 测试文本"
-    assert preview["rows"][0]["token_count"] == 3
-
-
-def test_lda_genre_filter_keeps_metadata_aligned_across_middle_empty_tokens(monkeypatch):
-    state = get_state()
-    state.cleaned_df = pd.DataFrame([
-        {"doc_id": "A", "genre": "新闻", "article_title": "首篇"},
-        {"doc_id": "B", "genre": "新闻", "article_title": "中间空词篇"},
-        {"doc_id": "C", "genre": "评论", "article_title": "其他文类"},
-        {"doc_id": "D", "genre": "新闻", "article_title": "末篇"},
-    ])
-    state.merged_df = state.cleaned_df.copy()
-    state.tokens_list = [
-        ["甲一", "甲二", "甲三"],
-        [],
-        ["丙一", "丙二", "丙三"],
-        ["丁一", "丁二", "丁三"],
-    ]
-    state.step_cleaned = True
-    captured = {}
-
-    def fake_build_corpus(tokens, **kwargs):
-        captured["model_tokens"] = tokens
-        return "dictionary", ["bow-A", "bow-D"], tokens
-
-    def fake_get_doc_topics(model, corpus, model_df, filtered_indices):
-        captured["metadata_doc_ids"] = model_df["doc_id"].tolist()
-        captured["filtered_indices"] = filtered_indices
-        result = model_df[["doc_id", "genre", "article_title"]].copy()
-        result["topic_0"] = [0.8, 0.2]
-        result["dominant_topic"] = ["主题0", "主题0"]
-        return result
-
-    monkeypatch.setattr(bridge, "build_corpus", fake_build_corpus)
-    monkeypatch.setattr(bridge, "train_lda", lambda *args, **kwargs: object())
-    monkeypatch.setattr(bridge, "get_topics", lambda model, n_words: [
-        {"topic_id": 0, "words": [("测试", 1.0)], "label": "主题1: 测试"},
-    ])
-    monkeypatch.setattr(bridge, "compute_coherence", lambda *args, **kwargs: 0.5)
-    monkeypatch.setattr(bridge, "get_doc_topics", fake_get_doc_topics)
-
-    result = bridge._run_lda({
-        "genre": "新闻",
-        "numTopics": 1,
-        "passes": 1,
-        "iterations": 10,
-        "minDocFreq": 1,
-        "maxDocFreqRatio": 1.0,
-    })
-
-    assert captured["model_tokens"] == [
-        ["甲一", "甲二", "甲三"],
-        ["丁一", "丁二", "丁三"],
-    ]
-    assert captured["metadata_doc_ids"] == ["A", "D"]
-    assert captured["filtered_indices"] == [0, 1]
-    assert [row["doc_id"] for row in result["documentTopics"]["rows"]] == ["A", "D"]
-    assert result["genre"] == "新闻"
-
-
-def test_selective_export_reports_successes_errors_and_compatible_session(monkeypatch, tmp_path):
-    metadata_path, text_path = _write_real_tables(tmp_path)
-    output_dir = tmp_path / "selected-export"
-
-    def fail_lda(_payload):
-        raise RuntimeError("测试中的 LDA 结果不可用")
-
-    monkeypatch.setattr(bridge, "_run_lda", fail_lda)
-    response = bridge.handle("task.export", _import_payload(
-        metadata_path,
-        text_path,
-        projectName="桌面版兼容项目",
-        outputDir=str(output_dir),
-        exportItems=["merged_data", "lda_coherence", "session_config"],
     ))
 
     assert response["ok"] is True
-    data = response["data"]
-    assert data["exported"] == ["merged_data.csv", "session_config.json"]
-    assert data["count"] == 2
-    assert data["errors"] == [{
-        "key": "lda_coherence",
-        "label": "LDA 结果",
-        "error": "测试中的 LDA 结果不可用",
-    }]
-    assert (output_dir / "merged_data.csv").exists()
-    assert not (output_dir / "lda_coherence.json").exists()
+    assert response["data"]["languages"]["zh"]["documents"] == 3
+    assert response["data"]["languages"]["en"]["documents"] == 3
+    rows = response["data"]["preview"]["rows"]
+    english = next(row for row in rows if row["doc_id"] == "E1")
+    assert "inter-\nnational" in english["text"]
+    assert "international" in english["cleaned_text"]
+    assert "the" not in english["tokens"].split()
+    assert "markets" in english["tokens"].split()
+    assert "market" not in english["tokens"].split()  # 不做词形还原
+    assert all(row["language"] in {"zh", "en"} for row in rows)
 
-    session = json.loads((output_dir / "session_config.json").read_text(encoding="utf-8"))
-    assert session["projectName"] == "桌面版兼容项目"
-    assert session["outputDir"] == str(output_dir)
-    assert session["project_name"] == "桌面版兼容项目"
-    assert session["output_dir"] == str(output_dir)
-    assert session["article_count"] == 3
-    assert session["lda_done"] is False
-    assert session["stm_done"] is False
-    datetime.fromisoformat(session["exported_at"])
+
+def test_lda_results_are_isolated_by_language_and_metadata_stays_aligned(monkeypatch, tmp_path):
+    path = _write_documents(tmp_path)
+    bridge.handle("task.clean", _payload(path, cleanConfig={"minTextLength": 1, "removeDuplicates": False, "zh": {}, "en": {}}))
+
+    captured = []
+
+    def fake_build(tokens, **_kwargs):
+        captured.append(tokens)
+        return object(), [f"bow-{index}" for index in range(len(tokens))], tokens
+
+    def fake_doc_topics(_model, corpus, model_df, _indices):
+        result = model_df.drop(columns=[column for column in ("text", "cleaned_text", "tokens", "token_count") if column in model_df]).copy()
+        result["topic_0"] = [1.0] * len(corpus)
+        result["dominant_topic"] = "主题1"
+        return result
+
+    monkeypatch.setattr(bridge, "build_corpus", fake_build)
+    monkeypatch.setattr(bridge, "train_lda", lambda *args, **kwargs: object())
+    monkeypatch.setattr(bridge, "get_topics", lambda *_args, **_kwargs: [{"topic_id": 0, "words": [("word", 1.0)], "label": "主题1"}])
+    monkeypatch.setattr(bridge, "compute_coherence", lambda *_args, **_kwargs: 0.5)
+    monkeypatch.setattr(bridge, "get_doc_topics", fake_doc_topics)
+
+    zh = bridge._run_lda({"language": "zh", "numTopics": 1, "minDocFreq": 1, "maxDocFreqRatio": 1.0})
+    en = bridge._run_lda({"language": "en", "numTopics": 1, "minDocFreq": 1, "maxDocFreqRatio": 1.0})
+
+    state = get_state()
+    assert set(state.lda_results) == {"zh", "en"}
+    assert {row["language"] for row in zh["documentTopics"]["rows"]} == {"zh"}
+    assert {row["language"] for row in en["documentTopics"]["rows"]} == {"en"}
+    assert all(len(tokens) == 3 for tokens in captured)
+
+
+def test_stm_results_are_isolated_by_language(monkeypatch, tmp_path):
+    path = _write_documents(tmp_path)
+    bridge.handle("task.clean", _payload(path, cleanConfig={"minTextLength": 1, "removeDuplicates": False, "zh": {}, "en": {}}))
+
+    def fake_train(model_df, _tokens, **_kwargs):
+        doc_topics = model_df.drop(columns=[column for column in ("text", "cleaned_text", "tokens", "token_count") if column in model_df]).copy()
+        doc_topics["topic_0"] = 1.0
+        doc_topics["dominant_topic"] = "主题1"
+        return object(), [{"topic_id": 0, "words": [("word", 0.0)]}], doc_topics, pd.DataFrame()
+
+    monkeypatch.setattr(bridge, "train_stm", fake_train)
+    zh = bridge._run_stm({"language": "zh", "numTopics": 1, "prevalenceFormula": "~ 1"})
+    en = bridge._run_stm({"language": "en", "numTopics": 1, "prevalenceFormula": "~ 1"})
+
+    assert set(get_state().stm_results) == {"zh", "en"}
+    assert {row["language"] for row in zh["documentTopics"]["rows"]} == {"zh"}
+    assert {row["language"] for row in en["documentTopics"]["rows"]} == {"en"}
+
+
+def test_export_uses_common_files_and_language_directories(monkeypatch, tmp_path):
+    path = _write_documents(tmp_path)
+    output = tmp_path / "export"
+
+    def fake_run_lda(payload):
+        language = payload["language"]
+        state = get_state()
+        frame = state.cleaned_df[state.cleaned_df["language"] == language][["doc_id", "language"]].reset_index(drop=True)
+        frame["topic_0"] = 1.0
+        state.lda_results[language] = {
+            "topics": [{"topic_id": 0, "words": [("word", 1.0)]}],
+            "doc_topics": frame,
+            "coherence": 0.5,
+        }
+        return {"language": language}
+
+    monkeypatch.setattr(bridge, "_run_lda", fake_run_lda)
+    response = bridge.handle("task.export", _payload(
+        path,
+        projectName="v2 回归测试",
+        outputDir=str(output),
+        exportLanguages=["zh", "en"],
+        exportItems=["documents", "cleaned_documents", "tokens_corpus", "lda_topic_word", "lda_doc_topic", "lda_coherence", "session_config"],
+        cleanConfig={"minTextLength": 1, "removeDuplicates": False, "zh": {}, "en": {}},
+    ))
+
+    assert response["ok"] is True
+    assert (output / "documents.csv").exists()
+    assert (output / "cleaned_documents.csv").exists()
+    assert (output / "zh" / "tokens_corpus.txt").exists()
+    assert (output / "en" / "lda_doc_topic.csv").exists()
+    session = json.loads((output / "session_config.json").read_text(encoding="utf-8"))
+    assert session["schemaVersion"] == 2
+    assert session["languageRows"] == {"zh": 3, "en": 3}
+    assert session["fieldMapping"]["language"] == "语种"

@@ -126,10 +126,8 @@ def get_doc_topics(
 
     # 合并文档元数据
     if merged_df is not None and filtered_indices is not None:
-        meta_cols = [c for c in [
-            "doc_id", "article_title", "newspaper", "pub_date",
-            "pub_year", "pub_month", "time_index", "genre"
-        ] if c in merged_df.columns]
+        excluded = {"text", "cleaned_text", "tokens", "token_count"}
+        meta_cols = [c for c in merged_df.columns if c not in excluded]
         sub_meta = merged_df.iloc[filtered_indices][meta_cols].reset_index(drop=True)
         df = pd.concat([sub_meta, df], axis=1)
 

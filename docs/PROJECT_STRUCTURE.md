@@ -4,8 +4,8 @@
 
 ## 保留在项目中的内容
 
-- `main.py`：Python GUI 主入口。
-- `run.bat`：Windows 一键启动脚本，会自动创建 `.venv` 并安装依赖。
+- `main.py`：冻结的 PySide6 v1 旧界面入口。
+- `run.bat`：Tauri v2 默认启动脚本；`run-legacy.bat` 启动旧 PySide6 回退界面。
 - `requirements.txt` / `requirements-dev.txt`：Python 运行和开发验证依赖。
 - `backend/`：Tauri 桌面壳与 Python 业务逻辑之间的桥接层。
 - `models/`：应用状态模型。
@@ -31,18 +31,16 @@
 
 ## 重新生成本地环境
 
-Python 桌面应用：
+Tauri v2 桌面应用：
 
 ```bat
 run.bat
 ```
 
-手动方式：
+PySide6 v1 回退：
 
 ```bat
-py -m venv .venv
-.venv\Scripts\python.exe -m pip install -r requirements.txt
-.venv\Scripts\python.exe main.py
+run-legacy.bat
 ```
 
 开发验证：

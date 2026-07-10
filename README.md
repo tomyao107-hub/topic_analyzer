@@ -1,265 +1,96 @@
-# 历史报刊主题分析工具
+# 历史文献主题分析工具 v2
 
-> 面向数字人文研究的中文报刊 LDA + STM 主题建模桌面应用
+面向数字人文与历史研究的中英文主题分析桌面工具。v2 使用一张文献表完成导入、清洗、LDA、STM、历史元数据对比和分语言导出。
 
----
+## v2 核心变化
 
-## 功能概览
+- 单表导入：不再接受“元数据表 + 文本表”双文件协议。
+- 双语预处理：中文使用 jieba；英文进行 Unicode 规范化、小写化、跨行断词修复和拉丁词分词。
+- 分语言建模：中文和英文拥有独立词表、LDA/STM 配置与结果。
+- 广义历史元数据：支持报刊、书信、日记、档案等材料，并保留所有自定义字段。
+- 可复现导出：`session_config.json` 使用 `schemaVersion: 2`，模型结果写入 `zh/`、`en/` 子目录。
 
-| 模块 | 功能 |
-|------|------|
-| 数据导入 | 支持 CSV / Excel，自动识别中英文字段名，拖拽上传 |
-| 数据清洗 | OCR 噪声清洗、jieba 分词、停用词过滤、繁简转换 |
-| LDA 建模 | gensim LDA，Coherence 评估，pyLDAvis 可视化 |
-| STM 建模 | 通过 rpy2 调用 R stm 包，支持 prevalence / content 协变量 |
-| 对比分析 | 报刊对比、年份趋势、文类差异，代表文章查看 |
-| 导出结果 | CSV 矩阵、图表、会话配置，处理日志 |
+## 输入格式
 
----
+支持 CSV、XLSX、XLS；Excel 读取第一张工作表。一行必须对应一篇分析文献。
 
-## 输入数据格式
+必填字段：
 
-### 元数据表（metadata.csv / xlsx）
+| 标准字段 | 含义 | 常见别名 |
+|---|---|---|
+| `doc_id` | 唯一文献编号 | 文献编号、文档编号、id |
+| `text` | 正文 | 正文、正文文本、content |
+| `language` | 语料语言 | 语言、语种、lang |
 
-| 字段（中文） | 字段（英文） | 必须 |
-|------------|------------|------|
-| 文档编号 | doc_id | ✅ |
-| 报刊名 | newspaper | 推荐 |
-| 出版日期 | pub_date | 推荐 |
-| 文章标题 | article_title | 推荐 |
-| 作者 | author | 可选 |
-| 期号 | issue_no | 可选 |
-| 页码 | page | 可选 |
-| 文类 | genre | 推荐（STM 协变量） |
-| 时间序号 | time_index | 可选（系统可自动生成） |
+`language` 会规范化为 `zh` 或 `en`。支持中文、Chinese、zh-CN、英文、English、en-US、en-GB 等常见值；缺失或未知值会阻止导入，系统不会自动猜测。
 
-### 关于 `time_index`
+推荐可选字段：
 
-如果数据跨多个年份，单独使用 `pub_month` 会把不同年份的同一月份合并。例如 1920 年 3 月和 1921 年 3 月都会被视为 3 月。系统会自动生成 `time_index`，将月份转换为从最早年月开始的连续序号，例如 1920 年 3 月为 1，1920 年 4 月为 2，1921 年 3 月为 13。
-
-用户也可以在元数据表中自行提供 `time_index`。如果已提供，系统会保留原值，不自动覆盖。
-
-### 文本表（texts.csv / xlsx）
-
-| 字段（中文） | 字段（英文） | 必须 |
-|------------|------------|------|
-| 文档编号 | doc_id | ✅ |
-| 正文文本 | text | ✅ |
-
----
-
-## 安装步骤
-
-### 1. 环境要求
-
-- Python 3.11+
-- （STM 功能）R >= 4.0
-
-### 2. 创建虚拟环境
-
-```bash
-python -m venv venv
-# Windows
-venv\Scripts\activate
-# macOS / Linux
-source venv/bin/activate
+```text
+title, creator, date, source_name, source_type, genre, place,
+collection, repository, volume, issue, page, notes, year, month, time_index
 ```
 
-### 3. 安装 Python 依赖
+旧字段名可以出现在新的单表中，例如 `article_title`、`author`、`newspaper`、`pub_date`，系统会映射到新的通用字段。其他列原样保留，可用于 STM 协变量和对比分析。
 
-```bash
-pip install -r requirements.txt
-```
+## 分析规则
 
-开发或运行测试时安装额外依赖：
+- 原始 `text` 永不覆盖；清洗结果写入 `cleaned_text`。
+- 中文最短 token 默认 1 个汉字，可使用停用词、自定义词典和繁简转换。
+- 英文默认保留词形和历史拼写，不做 stemming 或 lemmatization。
+- 词频和文档频率按语言分别计算。
+- 混合语料项目训练模型时必须选择 `zh` 或 `en`，不允许跨语言比较主题编号。
+- STM 默认 prevalence 公式为 `~ 1`。
 
-```bash
-pip install -r requirements-dev.txt
-```
+## 启动
 
-### 4. 安装 STM 所需 R 环境（可选）
-
-**步骤 4-1：安装 R**
-
-访问 https://cran.r-project.org/ 下载并安装适合您系统的 R（>= 4.0）。
-
-**步骤 4-2：在 R 控制台安装 stm 包**
-
-```r
-install.packages("stm")
-install.packages("quanteda")
-```
-
-**步骤 4-3：安装 rpy2**
-
-```bash
-pip install rpy2
-```
-
-**步骤 4-4（Windows 用户）：配置 R_HOME 环境变量**
-
-1. 找到 R 的安装路径，例如：`C:\Program Files\R\R-4.3.2`
-2. 设置系统环境变量 `R_HOME = C:\Program Files\R\R-4.3.2`
-3. 将 `C:\Program Files\R\R-4.3.2\bin\x64` 加入 `PATH`
-4. 重启命令行和本应用
-
-**步骤 4-5：验证配置**
-
-在 STM 分析页点击"检查 R 环境"按钮验证是否配置成功。
-
-### 5. 安装可选依赖
-
-```bash
-# LDA 交互可视化
-pip install pyLDAvis
-
-# 繁体转简体
-pip install opencc-python-reimplemented
-```
-
----
-
-## 启动应用
-
-### 推荐启动方式
-
-**Windows：**
-
-直接双击：
+v2 默认界面为 React + Tauri：
 
 ```bat
 run.bat
 ```
 
-它会自动：
-- 创建 `.venv` 虚拟环境
-- 安装 / 补齐依赖
-- 用同一个 Python 环境启动程序
-
-这样可以避免“明明安装了 PySide6，但运行时仍然提示找不到模块”的问题。
-
-**手动启动：**
+或手动启动：
 
 ```bash
-python main.py
+cd desktop
+npm install
+npm run tauri dev
 ```
 
----
+需要 Node.js、Rust、Python 3.11+；Python 依赖通过根目录 `requirements.txt` 安装。STM 另外需要 R、rpy2 和 R `stm` 包。
+
+旧 PySide6 v1 仅作为回退参考，不提供单表或双语能力：
+
+```bat
+run-legacy.bat
+```
+
+## 导出结构
+
+```text
+documents.csv
+cleaned_documents.csv
+zh/
+  tokens_corpus.txt
+  lda_topic_word.csv
+  lda_doc_topic.csv
+  lda_coherence.json
+  stm_topic_word.csv
+  stm_doc_topic.csv
+  stm_topic_prevalence.csv
+en/
+  ...同结构...
+session_config.json
+```
 
 ## 开发验证
 
-`pytest` 属于开发验证依赖，安装方式见 `requirements-dev.txt`。本机基础验证命令：
-
-```bash
-.venv\Scripts\python.exe -m py_compile backend\bridge.py main.py services\clean_service.py gui\pages\compare_page.py
+```bat
 .venv\Scripts\python.exe -m pytest -q
 cd desktop
-npm.cmd run build
+npm run build
 cargo check --manifest-path src-tauri\Cargo.toml
 ```
 
-## 使用流程
-
-```
-步骤 1  数据导入页  →  导入元数据表 + 文本表  →  合并数据
-步骤 2  数据清洗页  →  配置清洗参数  →  开始清洗与分词
-步骤 3  LDA 分析页  →  设置主题数  →  开始训练  →  查看结果
-步骤 4  STM 分析页  →  配置协变量  →  训练 STM  →  查看 prevalence
-步骤 5  对比分析页  →  刷新图表  →  查看报刊/年份/文类差异
-步骤 6  导出结果页  →  勾选导出项目  →  导出
-```
-
----
-
-## 输出文件说明
-
-| 文件名 | 内容 |
-|-------|------|
-| merged_data.csv | 合并后的主数据集 |
-| tokens_corpus.txt | 每篇文章分词结果（每行一篇） |
-| lda_topic_word.csv | LDA 主题-词矩阵 |
-| lda_doc_topic.csv | LDA 文档-主题分布矩阵 |
-| lda_coherence.json | LDA Coherence 指标 |
-| stm_topic_word.csv | STM 主题-词矩阵 |
-| stm_doc_topic.csv | STM 文档-主题分布矩阵 |
-| stm_topic_prevalence.csv | 按协变量分组的主题 prevalence |
-| session_config.json | 会话配置与导出记录 |
-| lda_vis.html | pyLDAvis 交互可视化（浏览器中打开） |
-
----
-
-## 项目结构
-
-```
-topic_analyzer/
-├── main.py                      # 主入口
-├── requirements.txt             # Python 依赖
-├── README.md                    # 本文件
-│
-├── models/
-│   ├── __init__.py
-│   └── app_state.py             # 应用全局状态（单例）
-│
-├── services/
-│   ├── __init__.py
-│   ├── data_service.py          # 数据导入与合并
-│   ├── clean_service.py         # 文本清洗与分词
-│   ├── lda_service.py           # LDA 建模（gensim）
-│   └── stm_service.py           # STM 建模（rpy2 + R stm）
-│
-├── utils/
-│   ├── __init__.py
-│   ├── field_mapper.py          # 中英文字段映射
-│   └── logger.py                # 日志工具（支持 GUI 信号）
-│
-└── gui/
-    ├── __init__.py
-    ├── main_window.py           # 主窗口框架
-    ├── styles.py                # 全局 QSS 样式表
-    │
-    ├── widgets/
-    │   ├── __init__.py
-    │   ├── nav_bar.py           # 左侧导航栏
-    │   └── status_bar.py        # 底部状态栏
-    │
-    └── pages/
-        ├── __init__.py
-        ├── welcome_page.py      # 首页（流程说明）
-        ├── import_page.py       # 数据导入页
-        ├── clean_page.py        # 数据清洗页
-        ├── lda_page.py          # LDA 分析页
-        ├── stm_page.py          # STM 分析页
-        ├── compare_page.py      # 对比分析页
-        └── export_page.py       # 导出与日志页
-```
-
----
-
-## 常见问题
-
-**Q：运行时报"找不到字体"**  
-A：应用会自动回退到系统可用字体，中文显示不受影响。
-
-**Q：rpy2 安装失败**  
-A：确保 R 已安装且 R_HOME 环境变量已正确配置，然后重新安装 rpy2。
-
-**Q：gensim LDA 训练很慢**  
-A：减少 passes（训练轮数）或语料规模，或增加 chunksize 参数。
-
-**Q：繁简转换不工作**  
-A：安装 opencc：`pip install opencc-python-reimplemented`
-
-**Q：pyLDAvis 无法打开**  
-A：安装 pyldavis：`pip install pyldavis`，然后重启应用。
-
----
-
-## 技术依赖
-
-- **GUI**：PySide6
-- **数据处理**：pandas, numpy
-- **中文分词**：jieba
-- **LDA 建模**：gensim
-- **LDA 可视化**：pyLDAvis
-- **STM 建模**：rpy2 + R stm 包
-- **图表**：matplotlib
+本版不直接读取 PDF、Word 或扫描图像，不提供 OCR 识别、自动语言识别、翻译或跨语言主题对齐。

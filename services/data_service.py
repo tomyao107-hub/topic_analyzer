@@ -7,13 +7,109 @@ from typing import Tuple, Optional, Dict
 import pandas as pd
 
 from utils.field_mapper import (
+    DOCUMENT_FIELD_MAP, REQUIRED_DOCUMENT,
     META_FIELD_MAP, TEXT_FIELD_MAP,
     detect_columns, normalize_df, check_required_fields,
-    parse_date_column, REQUIRED_META, REQUIRED_TEXT
+    parse_date_column, parse_document_date, REQUIRED_META, REQUIRED_TEXT
 )
 from utils.logger import get_logger
 
 logger = get_logger()
+
+LANGUAGE_ALIASES = {
+    "zh": "zh", "zh-cn": "zh", "zh-tw": "zh", "zh-hans": "zh", "zh-hant": "zh",
+    "中文": "zh", "汉语": "zh", "漢語": "zh", "chinese": "zh",
+    "en": "en", "en-us": "en", "en-gb": "en", "english": "en",
+    "英文": "en", "英语": "en", "英語": "en",
+}
+
+
+class DocumentValidationError(ValueError):
+    """统一文献表校验失败，并携带可供界面定位的结构化问题。"""
+
+    def __init__(self, issues: list):
+        self.issues = issues
+        super().__init__("文献表校验失败：" + "；".join(issue["message"] for issue in issues))
+
+
+def _data_rows(mask: pd.Series, limit: int = 50) -> list:
+    """返回从 2 开始的表格行号（第 1 行是表头）。"""
+    return [int(index) + 2 for index in mask[mask].index[:limit]]
+
+
+def detect_document_columns(df: pd.DataFrame) -> Tuple[Dict[str, str], list, list]:
+    """检测 v2 单一文献表字段。"""
+    col_map, unrecognized = detect_columns(df, DOCUMENT_FIELD_MAP)
+    return col_map, check_required_fields(col_map, REQUIRED_DOCUMENT), unrecognized
+
+
+def normalize_language(value) -> Optional[str]:
+    if pd.isna(value):
+        return None
+    return LANGUAGE_ALIASES.get(str(value).strip().lower())
+
+
+def validate_documents(df: pd.DataFrame, col_map: Dict[str, str]) -> pd.DataFrame:
+    """严格校验并标准化一行一篇的 v2 文献表。"""
+    missing = check_required_fields(col_map, REQUIRED_DOCUMENT)
+    if missing:
+        raise DocumentValidationError([{
+            "type": "missing_columns", "columns": missing, "rows": [], "samples": [],
+            "message": f"缺少必填列：{', '.join(missing)}",
+        }])
+
+    documents = normalize_df(df, col_map).copy()
+    issues = []
+    for field in REQUIRED_DOCUMENT:
+        series = documents[field]
+        blank = series.isna() | series.astype(str).str.strip().eq("")
+        if blank.any():
+            rows = _data_rows(blank)
+            issues.append({
+                "type": "blank_required_value", "column": field, "rows": rows,
+                "samples": rows[:5],
+                "message": f"{field} 存在空值（数据行 {', '.join(map(str, rows[:5]))}）",
+            })
+
+    doc_ids = documents["doc_id"].fillna("").astype(str).str.strip()
+    duplicate = doc_ids.ne("") & doc_ids.duplicated(keep=False)
+    if duplicate.any():
+        rows = _data_rows(duplicate)
+        samples = doc_ids[duplicate].drop_duplicates().head(5).tolist()
+        issues.append({
+            "type": "duplicate_doc_id", "column": "doc_id", "rows": rows,
+            "samples": samples,
+            "message": f"doc_id 重复（数据行 {', '.join(map(str, rows[:5]))}）",
+        })
+
+    normalized_languages = documents["language"].map(normalize_language)
+    nonblank = documents["language"].notna() & documents["language"].astype(str).str.strip().ne("")
+    unsupported = nonblank & normalized_languages.isna()
+    if unsupported.any():
+        rows = _data_rows(unsupported)
+        samples = documents.loc[unsupported, "language"].astype(str).drop_duplicates().head(5).tolist()
+        issues.append({
+            "type": "unsupported_language", "column": "language", "rows": rows,
+            "samples": samples, "message": f"language 含不支持的值：{', '.join(samples)}",
+        })
+
+    if issues:
+        raise DocumentValidationError(issues)
+
+    documents["doc_id"] = doc_ids
+    documents["text"] = documents["text"].astype(str)
+    documents["language"] = normalized_languages
+    return parse_document_date(documents)
+
+
+def load_documents(path: str, field_mapping: Optional[Dict[str, str]] = None):
+    """加载、检测并校验 v2 单表，返回 (documents, mapping, unrecognized)。"""
+    raw_df = load_file(path)
+    detected, _, unrecognized = detect_document_columns(raw_df)
+    for standard, original in (field_mapping or {}).items():
+        if standard in DOCUMENT_FIELD_MAP and original in raw_df.columns:
+            detected[standard] = original
+    return validate_documents(raw_df, detected), detected, unrecognized
 
 
 def _safe_sample(values, size: int = 3) -> list:

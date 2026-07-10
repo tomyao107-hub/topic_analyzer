@@ -19,8 +19,8 @@ struct SelectedTextFile {
 #[tauri::command]
 fn select_import_file() -> Option<String> {
     rfd::FileDialog::new()
-        .set_title("选择数据表")
-        .add_filter("数据表", &["csv", "xlsx", "xls"])
+        .set_title("选择 v2 单一文献表")
+        .add_filter("文献表", &["csv", "xlsx", "xls"])
         .pick_file()
         .map(|path| path.to_string_lossy().to_string())
 }

@@ -1,16 +1,31 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 
+export type LanguageCode = "zh" | "en";
 export type RouteKey = "welcome" | "import" | "clean" | "lda" | "stm" | "compare" | "export";
+export type TaskKey = Exclude<RouteKey, "welcome">;
 export type TaskStatus = "idle" | "running" | "succeeded" | "failed";
-export type TaskKey = "import" | "clean" | "lda" | "stm" | "compare" | "export";
+export type TaskResult = Record<string, unknown> | null;
 
-type WorkflowFlags = {
+export type WorkflowFlags = {
   imported: boolean;
-  merged: boolean;
   cleaned: boolean;
   ldaDone: boolean;
   stmDone: boolean;
+};
+
+export type LanguageWorkflow = Record<LanguageCode, { cleaned: boolean; ldaDone: boolean; stmDone: boolean }>;
+
+export type WorkflowSummary = {
+  documentRows: number;
+  languageRows: Record<LanguageCode, number>;
+  cleanDocuments: number;
+  totalTokens: Record<LanguageCode, number>;
+  uniqueWords: Record<LanguageCode, number>;
+  ldaTopics: Record<LanguageCode, number>;
+  ldaCoherence: Record<LanguageCode, number | null>;
+  stmTopics: Record<LanguageCode, number>;
+  exportFiles: number;
 };
 
 export type TaskState = {
@@ -25,26 +40,20 @@ export type TaskState = {
   updatedAt: string;
 };
 
-type WorkflowSummary = {
-  metadataRows: number;
-  textRows: number;
-  mergedRows: number;
-  unmatchedMetaRows: number;
-  unmatchedTextRows: number;
-  cleanDocuments: number;
-  totalTokens: number;
-  uniqueWords: number;
-  ldaTopics: number;
-  ldaCoherence: number | null;
-  stmTopics: number;
-  exportFiles: number;
+export type ImportConfig = {
+  dataPath: string;
+  fieldMapping: { doc_id: string; text: string; language: string };
 };
 
-export type ImportConfig = {
-  metadataPath: string;
-  textPath: string;
-  metadataIdField: string;
-  textIdField: string;
+export type LanguageCleanConfig = {
+  useDefaultStopwords: boolean;
+  stopwordsText: string;
+  stopwordsPath: string;
+  minTokenLength: number;
+  customDictPath?: string;
+  traditionalToSimplified?: boolean;
+  lowercase?: boolean;
+  repairHyphenation?: boolean;
 };
 
 export type CleanConfig = {
@@ -53,18 +62,15 @@ export type CleanConfig = {
   ocrClean: boolean;
   removePunct: boolean;
   removeNumbers: boolean;
-  traditionalToSimplified: boolean;
   minTextLength: number;
   minTokenFreq: number;
   minDocFreq: number;
   maxDocFreqRatio: number;
-  customDictPath: string;
-  useDefaultStopwords: boolean;
-  stopwordsText: string;
-  stopwordsPath: string;
+  zh: LanguageCleanConfig;
+  en: LanguageCleanConfig;
 };
 
-export type LdaConfig = {
+export type LdaParams = {
   numTopics: number;
   passes: number;
   iterations: number;
@@ -74,7 +80,7 @@ export type LdaConfig = {
   genre: string;
 };
 
-export type StmConfig = {
+export type StmParams = {
   numTopics: number;
   prevalenceFormula: string;
   contentCovariate: string;
@@ -84,13 +90,11 @@ export type StmConfig = {
 };
 
 export type CompareConfig = {
-  model: "auto" | "lda" | "stm";
+  language: LanguageCode;
+  model: "lda" | "stm";
   axisField: string;
   metricField: string;
-  topicField: string;
-  newspaper: string;
-  year: string;
-  genre: string;
+  filters: Record<string, string>;
   representativeLimit: number;
   chartType: "line" | "bar";
 };
@@ -99,17 +103,29 @@ export type ExportConfig = {
   projectName: string;
   outputDir: string;
   items: string[];
+  languages: LanguageCode[];
 };
 
 export type WorkflowConfigs = {
   clean: CleanConfig;
-  lda: LdaConfig;
-  stm: StmConfig;
+  ldaLanguage: LanguageCode;
+  lda: Record<LanguageCode, LdaParams>;
+  stmLanguage: LanguageCode;
+  stm: Record<LanguageCode, StmParams>;
   compare: CompareConfig;
   export: ExportConfig;
 };
 
-export type ConfigTaskKey = keyof WorkflowConfigs;
+export type ConfigTaskKey = "clean" | "compare" | "export";
+type LanguageResults = Record<LanguageCode, TaskResult>;
+export type WorkflowResults = {
+  import: TaskResult;
+  clean: TaskResult;
+  lda: LanguageResults;
+  stm: LanguageResults;
+  compare: LanguageResults;
+  export: TaskResult;
+};
 
 export type StmEnvironmentState = {
   checking: boolean;
@@ -118,9 +134,18 @@ export type StmEnvironmentState = {
   checkedAt: string;
 };
 
-type SelectedTextFile = {
-  path: string;
-  content: string;
+type SelectedTextFile = { path: string; content: string };
+type BackendResponse = {
+  ok: boolean;
+  data?: Record<string, unknown>;
+  logs?: string[];
+  state?: {
+    workflow?: Partial<WorkflowFlags>;
+    languageWorkflow?: Partial<LanguageWorkflow>;
+    session?: { projectName?: string; outputDir?: string };
+    summary?: Partial<WorkflowSummary>;
+  };
+  error?: { message?: string; suggestion?: string; issues?: Array<{ message?: string }> };
 };
 
 type WorkflowState = {
@@ -128,576 +153,254 @@ type WorkflowState = {
   projectName: string;
   outputDir: string;
   workflow: WorkflowFlags;
+  languageWorkflow: LanguageWorkflow;
   summary: WorkflowSummary;
   importConfig: ImportConfig;
   configs: WorkflowConfigs;
   tasks: Record<TaskKey, TaskState>;
-  results: Record<TaskKey, Record<string, unknown> | null>;
+  results: WorkflowResults;
   stmEnvironment: StmEnvironmentState;
   logs: string[];
   setActiveRoute: (route: RouteKey) => void;
   setImportConfig: (values: Partial<ImportConfig>) => void;
   setTaskConfig: <K extends ConfigTaskKey>(task: K, values: Partial<WorkflowConfigs[K]>) => void;
-  chooseImportFile: (role: "metadata" | "text") => Promise<void>;
-  chooseConfigPath: (target: "customDict" | "stopwords" | "outputDir") => Promise<void>;
+  setModelLanguage: (model: "lda" | "stm", language: LanguageCode) => void;
+  setModelConfig: (model: "lda" | "stm", language: LanguageCode, values: Partial<LdaParams & StmParams>) => void;
+  setLanguageCleanConfig: (language: LanguageCode, values: Partial<LanguageCleanConfig>) => void;
+  chooseImportFile: () => Promise<void>;
+  chooseConfigPath: (target: "customDict" | "stopwords" | "outputDir", language?: LanguageCode) => Promise<void>;
   runBackendTask: (task: TaskKey) => Promise<void>;
   checkStmEnvironment: () => Promise<void>;
-  failBackendTask: (task: TaskKey) => void;
   clearLogs: () => void;
 };
 
 const now = () => new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-
-const createTask = (key: TaskKey, label: string): TaskState => ({
-  key,
-  label,
-  status: "idle",
-  phase: "等待操作",
-  message: "尚未启动",
-  progress: null,
-  summary: "",
-  error: "",
-  updatedAt: "--"
-});
-
-const taskLabels: Record<TaskKey, string> = {
-  import: "导入与合并",
-  clean: "清洗与分词",
-  lda: "LDA 训练",
-  stm: "STM 训练",
-  compare: "对比分析",
-  export: "批量导出"
+const languages: LanguageCode[] = ["zh", "en"];
+const labels: Record<TaskKey, string> = {
+  import: "导入文献", clean: "双语清洗", lda: "LDA 训练", stm: "STM 训练", compare: "对比分析", export: "导出结果"
+};
+const phases: Record<TaskKey, string> = {
+  import: "字段识别与严格校验", clean: "语言感知清洗与分词", lda: "分语言 LDA 训练",
+  stm: "分语言 STM 训练", compare: "历史元数据聚合", export: "按语言重建并写入结果"
 };
 
-const taskPlans: Record<TaskKey, { phase: string; message: string; progress: number }> = {
-  import: {
-    phase: "字段识别与合并",
-    message: "正在校验元数据表、正文表和 doc_id 映射",
-    progress: 72
-  },
-  clean: {
-    phase: "文本清洗与分词",
-    message: "正在应用 OCR 清理、停用词和词频阈值",
-    progress: 58
-  },
-  lda: {
-    phase: "模型训练与指标计算",
-    message: "正在训练主题模型并计算一致性指标",
-    progress: 64
-  },
-  stm: {
-    phase: "R 环境调用与协变量估计",
-    message: "正在检查 prevalence 公式并训练结构主题模型",
-    progress: 46
-  },
-  compare: {
-    phase: "聚合主题差异",
-    message: "正在按报刊、年份和主题维度生成趋势摘要",
-    progress: 83
-  },
-  export: {
-    phase: "写入结果文件",
-    message: "正在汇总清洗语料、主题结果、图表数据和日志",
-    progress: 69
-  }
-};
-
-const initialTasks = Object.fromEntries(
-  (Object.keys(taskLabels) as TaskKey[]).map((key) => [key, createTask(key, taskLabels[key])])
-) as Record<TaskKey, TaskState>;
-
-const createInitialResults = (): Record<TaskKey, Record<string, unknown> | null> => ({
-  import: null,
-  clean: null,
-  lda: null,
-  stm: null,
-  compare: null,
-  export: null
+const createTask = (key: TaskKey): TaskState => ({
+  key, label: labels[key], status: "idle", phase: "等待操作", message: "尚未启动",
+  progress: null, summary: "", error: "", updatedAt: "--"
+});
+const createTasks = () => Object.fromEntries((Object.keys(labels) as TaskKey[]).map((key) => [key, createTask(key)])) as Record<TaskKey, TaskState>;
+const emptyLanguageResults = (): LanguageResults => ({ zh: null, en: null });
+const createResults = (): WorkflowResults => ({ import: null, clean: null, lda: emptyLanguageResults(), stm: emptyLanguageResults(), compare: emptyLanguageResults(), export: null });
+const emptyLanguageWorkflow = (): LanguageWorkflow => ({
+  zh: { cleaned: false, ldaDone: false, stmDone: false },
+  en: { cleaned: false, ldaDone: false, stmDone: false }
+});
+const emptySummary = (): WorkflowSummary => ({
+  documentRows: 0, languageRows: { zh: 0, en: 0 }, cleanDocuments: 0,
+  totalTokens: { zh: 0, en: 0 }, uniqueWords: { zh: 0, en: 0 },
+  ldaTopics: { zh: 0, en: 0 }, ldaCoherence: { zh: null, en: null },
+  stmTopics: { zh: 0, en: 0 }, exportFiles: 0
 });
 
-const appendLog = (logs: string[], message: string) => [...logs, `[${now()}] ${message}`].slice(-200);
-
-const parseStopwords = (text: string) => [...new Set(
-  text.split(/\r?\n/).map((word) => word.trim()).filter((word) => word.length > 0)
-)];
-
-const clampNumber = (value: number, min: number, max: number, fallback: number) => (
-  Number.isFinite(value) ? Math.min(max, Math.max(min, value)) : fallback
-);
-
-const clampInteger = (value: number, min: number, max: number, fallback: number) => (
-  Math.trunc(clampNumber(value, min, max, fallback))
-);
-
-const normalizeLdaConfig = (config: LdaConfig): LdaConfig => ({
-  ...config,
-  numTopics: clampInteger(config.numTopics, 2, 100, 10),
-  passes: clampInteger(config.passes, 1, 500, 20),
-  iterations: clampInteger(config.iterations, 50, 2000, 400),
-  randomState: clampInteger(config.randomState, 0, 9999, 42),
-  minDocFreq: clampInteger(config.minDocFreq, 1, 50, 2),
-  maxDocFreqRatio: clampNumber(config.maxDocFreqRatio, 0.01, 1, 0.95)
-});
-
-const normalizeStmConfig = (config: StmConfig): StmConfig => ({
-  ...config,
-  numTopics: clampInteger(config.numTopics, 2, 100, 10),
-  maxEmIterations: clampInteger(config.maxEmIterations, 10, 500, 75),
-  randomState: clampInteger(config.randomState, 0, 9999, 42)
-});
+const defaultLda = (): LdaParams => ({ numTopics: 10, passes: 20, iterations: 400, randomState: 42, minDocFreq: 2, maxDocFreqRatio: 0.95, genre: "__all__" });
+const defaultStm = (): StmParams => ({ numTopics: 10, prevalenceFormula: "~ 1", contentCovariate: "", maxEmIterations: 75, randomState: 42, genre: "__all__" });
+const parseStopwords = (text: string) => [...new Set(text.split(/\r?\n/).map((word) => word.trim()).filter(Boolean))];
 
 const cleanPayload = (config: CleanConfig) => ({
-  options: config,
-  stopwords: parseStopwords(config.stopwordsText),
-  useDefaultStopwords: config.useDefaultStopwords,
-  stopwordsPath: config.stopwordsPath.trim() || undefined,
-  customDictPath: config.customDictPath.trim() || undefined
+  cleanConfig: {
+    removeEmpty: config.removeEmpty,
+    removeDuplicates: config.removeDuplicates,
+    ocrClean: config.ocrClean,
+    removePunct: config.removePunct,
+    removeNumbers: config.removeNumbers,
+    minTextLength: config.minTextLength,
+    minTokenFreq: config.minTokenFreq,
+    minDocFreq: config.minDocFreq,
+    maxDocFreqRatio: config.maxDocFreqRatio,
+    zh: { ...config.zh, stopwords: parseStopwords(config.zh.stopwordsText) },
+    en: { ...config.en, stopwords: parseStopwords(config.en.stopwordsText) }
+  }
 });
-
-const applyTaskResult = (task: TaskKey, workflow: WorkflowFlags, summary: WorkflowSummary) => {
-  if (task === "import") {
-    workflow.imported = true;
-    workflow.merged = true;
-    summary.metadataRows = 1248;
-    summary.textRows = 1243;
-    summary.mergedRows = 1236;
-    summary.unmatchedMetaRows = 12;
-    summary.unmatchedTextRows = 7;
-  }
-
-  if (task === "clean") {
-    workflow.cleaned = true;
-    summary.cleanDocuments = 1204;
-    summary.totalTokens = 86420;
-    summary.uniqueWords = 7842;
-  }
-
-  if (task === "lda") {
-    workflow.ldaDone = true;
-    summary.ldaTopics = 12;
-    summary.ldaCoherence = 0.512;
-  }
-
-  if (task === "stm") {
-    workflow.stmDone = true;
-    summary.stmTopics = 10;
-  }
-
-  if (task === "export") {
-    summary.exportFiles = 5;
-  }
-};
-
-type BackendResponse = {
-  ok: boolean;
-  data?: Record<string, unknown>;
-  logs?: string[];
-  state?: {
-    workflow?: WorkflowFlags;
-    session?: {
-      projectName?: string;
-      outputDir?: string;
-    };
-    summary?: Partial<WorkflowSummary>;
-  };
-  error?: {
-    message?: string;
-    suggestion?: string;
-  };
-};
 
 const backendPayload = (task: TaskKey, state: WorkflowState) => {
   const session = { projectName: state.projectName, outputDir: state.outputDir };
-
-  if (task === "import") {
-    return {
-      ...session,
-      metadataPath: state.importConfig.metadataPath.trim() || undefined,
-      textPath: state.importConfig.textPath.trim() || undefined,
-      metadataIdField: state.importConfig.metadataIdField,
-      textIdField: state.importConfig.textIdField
-    };
-  }
-
-  if (task === "export") {
-    return {
-      projectName: state.configs.export.projectName.trim() || "未命名项目",
-      outputDir: state.configs.export.outputDir.trim(),
-      exportItems: state.configs.export.items,
-      ...cleanPayload(state.configs.clean),
-      ldaConfig: normalizeLdaConfig(state.configs.lda),
-      stmConfig: normalizeStmConfig(state.configs.stm)
-    };
-  }
-
-  if (task === "lda") {
-    return { ...session, ...normalizeLdaConfig(state.configs.lda) };
-  }
-
-  if (task === "clean") {
-    return {
-      ...session,
-      ...cleanPayload(state.configs.clean)
-    };
-  }
-
-  if (task === "stm") {
-    return { ...session, ...normalizeStmConfig(state.configs.stm) };
-  }
-
-  if (task === "compare") {
-    const selectedModel = state.configs.compare.model === "auto"
-      ? state.workflow.ldaDone ? "lda" : "stm"
-      : state.configs.compare.model;
-    const modelConfig = selectedModel === "stm"
-      ? normalizeStmConfig(state.configs.stm)
-      : normalizeLdaConfig(state.configs.lda);
-    return { ...session, ...modelConfig, ...state.configs.compare, model: selectedModel };
-  }
-
-  return session;
-};
-
-const taskSummary = (task: TaskKey, response: BackendResponse) => {
-  const summary = response.state?.summary;
-  const data = response.data ?? {};
-
-  if (task === "import") {
-    return `已识别 ${summary?.metadataRows ?? 0} 条元数据、${summary?.textRows ?? 0} 条正文，合并 ${summary?.mergedRows ?? 0} 篇文章`;
-  }
-
-  if (task === "clean") {
-    return `已生成 ${summary?.cleanDocuments ?? 0} 篇有效语料，保留 ${summary?.totalTokens ?? 0} 个词元和 ${summary?.uniqueWords ?? 0} 个唯一词`;
-  }
-
-  if (task === "lda") {
-    return `已完成 ${summary?.ldaTopics ?? 0} 个 LDA 主题，Coherence ${summary?.ldaCoherence ?? "未计算"}`;
-  }
-
-  if (task === "stm") {
-    return `已完成 ${data.topicCount ?? summary?.stmTopics ?? 0} 个 STM 主题，覆盖 ${data.documents ?? 0} 篇文档`;
-  }
-
-  if (task === "compare") {
-    const rows = Array.isArray(data.rows) ? data.rows.length : Number(data.rows ?? 0);
-    const topics = data.representativeArticles && typeof data.representativeArticles === "object"
-      ? Object.keys(data.representativeArticles).length
-      : 0;
-    return `已生成 ${rows} 行对比数据，包含 ${topics} 个主题的代表文章`;
-  }
-
-  return `已导出 ${summary?.exportFiles ?? 0} 个结果文件`;
-};
-
-const mergeBackendState = (task: TaskKey, state: WorkflowState, response: BackendResponse) => {
-  const incomingWorkflow = response.state?.workflow;
-  const workflow = task === "import"
-    ? { ...state.workflow, ...(incomingWorkflow ?? {}) }
-    : {
-        imported: state.workflow.imported || incomingWorkflow?.imported === true,
-        merged: state.workflow.merged || incomingWorkflow?.merged === true,
-        cleaned: state.workflow.cleaned || incomingWorkflow?.cleaned === true,
-        ldaDone: state.workflow.ldaDone || incomingWorkflow?.ldaDone === true,
-        stmDone: state.workflow.stmDone || incomingWorkflow?.stmDone === true
-      };
-  const summary = { ...state.summary, ...(response.state?.summary ?? {}) };
-  const session = response.state?.session ?? {};
-
-  if (!incomingWorkflow) {
-    applyTaskResult(task, workflow, summary);
-  }
-
-  return {
-    workflow,
-    summary,
-    projectName: session.projectName || state.projectName,
-    outputDir: session.outputDir || state.outputDir
+  if (task === "import") return {
+    ...session,
+    dataPath: state.importConfig.dataPath.trim() || undefined,
+    fieldMapping: state.importConfig.fieldMapping
   };
+  const common = {
+    ...session,
+    ...cleanPayload(state.configs.clean),
+    ldaConfigs: state.configs.lda,
+    stmConfigs: state.configs.stm
+  };
+  if (task === "clean") return common;
+  if (task === "lda") return { ...common, language: state.configs.ldaLanguage };
+  if (task === "stm") return { ...common, language: state.configs.stmLanguage };
+  if (task === "compare") return { ...common, ...state.configs.compare };
+  return {
+    ...common,
+    projectName: state.configs.export.projectName.trim() || "未命名项目",
+    outputDir: state.configs.export.outputDir.trim(),
+    exportItems: state.configs.export.items,
+    exportLanguages: state.configs.export.languages
+  };
+};
+
+const appendLogs = (existing: string[], incoming: string[] = []) => [...existing, ...incoming].slice(-600);
+
+const taskSummary = (task: TaskKey, state: WorkflowState, data: Record<string, unknown>) => {
+  if (task === "import") return `已导入 ${state.summary.documentRows} 篇文献（中文 ${state.summary.languageRows.zh}，英文 ${state.summary.languageRows.en}）`;
+  if (task === "clean") return `已生成 ${state.summary.cleanDocuments} 篇有效语料`;
+  if (task === "export") return `已写入 ${String(data.count ?? state.summary.exportFiles)} 个文件`;
+  const fallbackLanguage = task === "lda" ? state.configs.ldaLanguage : task === "stm" ? state.configs.stmLanguage : state.configs.compare.language;
+  const language = String(data.language ?? fallbackLanguage);
+  return `${language === "en" ? "英文" : "中文"}${labels[task]}完成`;
 };
 
 export const useWorkflowStore = create<WorkflowState>((set, get) => ({
   activeRoute: "welcome",
   projectName: "未命名项目",
   outputDir: "",
-  workflow: {
-    imported: false,
-    merged: false,
-    cleaned: false,
-    ldaDone: false,
-    stmDone: false
-  },
-  summary: {
-    metadataRows: 0,
-    textRows: 0,
-    mergedRows: 0,
-    unmatchedMetaRows: 0,
-    unmatchedTextRows: 0,
-    cleanDocuments: 0,
-    totalTokens: 0,
-    uniqueWords: 0,
-    ldaTopics: 0,
-    ldaCoherence: null,
-    stmTopics: 0,
-    exportFiles: 0
-  },
-  importConfig: {
-    metadataPath: "",
-    textPath: "",
-    metadataIdField: "doc_id",
-    textIdField: "doc_id"
-  },
+  workflow: { imported: false, cleaned: false, ldaDone: false, stmDone: false },
+  languageWorkflow: emptyLanguageWorkflow(),
+  summary: emptySummary(),
+  importConfig: { dataPath: "", fieldMapping: { doc_id: "doc_id", text: "text", language: "language" } },
   configs: {
     clean: {
-      removeEmpty: true,
-      removeDuplicates: true,
-      ocrClean: true,
-      removePunct: true,
-      removeNumbers: true,
-      traditionalToSimplified: false,
-      minTextLength: 10,
-      minTokenFreq: 1,
-      minDocFreq: 2,
-      maxDocFreqRatio: 0.95,
-      customDictPath: "",
-      useDefaultStopwords: true,
-      stopwordsText: "",
-      stopwordsPath: ""
+      removeEmpty: true, removeDuplicates: true, ocrClean: true, removePunct: true,
+      removeNumbers: true, minTextLength: 10, minTokenFreq: 1, minDocFreq: 2, maxDocFreqRatio: 0.95,
+      zh: { useDefaultStopwords: true, stopwordsText: "", stopwordsPath: "", minTokenLength: 1, customDictPath: "", traditionalToSimplified: false },
+      en: { useDefaultStopwords: true, stopwordsText: "", stopwordsPath: "", minTokenLength: 2, lowercase: true, repairHyphenation: true }
     },
-    lda: {
-      numTopics: 10,
-      passes: 20,
-      iterations: 400,
-      randomState: 42,
-      minDocFreq: 2,
-      maxDocFreqRatio: 0.95,
-      genre: "全部文类"
-    },
-    stm: {
-      numTopics: 10,
-      prevalenceFormula: "~ newspaper",
-      contentCovariate: "",
-      maxEmIterations: 75,
-      randomState: 42,
-      genre: "全部文类"
-    },
-    compare: {
-      model: "auto",
-      axisField: "newspaper",
-      metricField: "__all__",
-      topicField: "__all__",
-      newspaper: "__all__",
-      year: "__all__",
-      genre: "__all__",
-      representativeLimit: 3,
-      chartType: "bar"
-    },
+    ldaLanguage: "zh", lda: { zh: defaultLda(), en: defaultLda() },
+    stmLanguage: "zh", stm: { zh: defaultStm(), en: defaultStm() },
+    compare: { language: "zh", model: "lda", axisField: "source_name", metricField: "__all__", filters: {}, representativeLimit: 3, chartType: "bar" },
     export: {
-      projectName: "未命名项目",
-      outputDir: "",
-      items: [
-        "merged_data",
-        "cleaned_records",
-        "cleaned_corpus",
-        "lda_topic_word",
-        "lda_doc_topic",
-        "lda_coherence",
-        "stm_topic_word",
-        "stm_doc_topic",
-        "stm_prevalence",
-        "session_config"
-      ]
+      projectName: "未命名项目", outputDir: "", languages: ["zh", "en"],
+      items: ["documents", "cleaned_documents", "tokens_corpus", "lda_topic_word", "lda_doc_topic", "lda_coherence", "stm_topic_word", "stm_doc_topic", "stm_prevalence", "session_config"]
     }
   },
-  tasks: initialTasks,
-  results: createInitialResults(),
-  stmEnvironment: {
-    checking: false,
-    available: null,
-    message: "尚未检查 R 环境",
-    checkedAt: "--"
-  },
+  tasks: createTasks(),
+  results: createResults(),
+  stmEnvironment: { checking: false, available: null, message: "尚未检查 R 环境", checkedAt: "--" },
   logs: [],
-  setActiveRoute: (route) => set({ activeRoute: route }),
+  setActiveRoute: (activeRoute) => set({ activeRoute }),
   setImportConfig: (values) => set((state) => ({ importConfig: { ...state.importConfig, ...values } })),
-  setTaskConfig: (task, values) => set((state) => ({
-    configs: { ...state.configs, [task]: { ...state.configs[task], ...values } }
-  } as Partial<WorkflowState>)),
-  chooseImportFile: async (role) => {
-    const path = await invoke<string | null>("select_import_file");
-    if (path) {
-      set((state) => ({
-        importConfig: {
-          ...state.importConfig,
-          [role === "metadata" ? "metadataPath" : "textPath"]: path
-        }
-      }));
-    }
+  setTaskConfig: (task, values) => set((state) => ({ configs: { ...state.configs, [task]: { ...state.configs[task], ...values } } as WorkflowConfigs })),
+  setModelLanguage: (model, language) => set((state) => ({ configs: { ...state.configs, [`${model}Language`]: language } } as Partial<WorkflowState>)),
+  setModelConfig: (model, language, values) => set((state) => ({
+    configs: { ...state.configs, [model]: { ...state.configs[model], [language]: { ...state.configs[model][language], ...values } } } as WorkflowConfigs
+  })),
+  setLanguageCleanConfig: (language, values) => set((state) => ({
+    configs: { ...state.configs, clean: { ...state.configs.clean, [language]: { ...state.configs.clean[language], ...values } } }
+  })),
+  chooseImportFile: async () => {
+    const dataPath = await invoke<string | null>("select_import_file");
+    if (dataPath) set((state) => ({ importConfig: { ...state.importConfig, dataPath } }));
   },
-  chooseConfigPath: async (target) => {
+  chooseConfigPath: async (target, language = "zh") => {
     if (target === "stopwords") {
       const selected = await invoke<SelectedTextFile | null>("select_stopwords_file");
-      if (!selected) return;
-      set((state) => ({
-        configs: {
-          ...state.configs,
-          clean: {
-            ...state.configs.clean,
-            stopwordsPath: selected.path,
-            stopwordsText: selected.content
-          }
-        }
-      }));
+      if (selected) get().setLanguageCleanConfig(language, { stopwordsPath: selected.path, stopwordsText: selected.content });
       return;
     }
-
-    const command = target === "outputDir" ? "select_output_directory" : "select_dictionary_file";
-    const path = await invoke<string | null>(command);
-    if (!path) return;
-    set((state) => target === "outputDir"
-      ? {
-          outputDir: path,
-          configs: { ...state.configs, export: { ...state.configs.export, outputDir: path } }
-        }
-      : {
-          configs: { ...state.configs, clean: { ...state.configs.clean, customDictPath: path } }
-        });
+    if (target === "outputDir") {
+      const outputDir = await invoke<string | null>("select_output_directory");
+      if (outputDir) set((state) => ({ outputDir, configs: { ...state.configs, export: { ...state.configs.export, outputDir } } }));
+      return;
+    }
+    const path = await invoke<string | null>("select_dictionary_file");
+    if (path) get().setLanguageCleanConfig("zh", { customDictPath: path });
   },
   runBackendTask: async (task) => {
-    const plan = taskPlans[task];
     set((state) => ({
-      results: task === "import" ? createInitialResults() : state.results,
-      logs: appendLog(state.logs, `${taskLabels[task]}：开始`),
-      tasks: {
-        ...state.tasks,
-        [task]: {
-          ...state.tasks[task],
-          status: "running",
-          phase: plan.phase,
-          message: plan.message,
-          progress: plan.progress,
-          summary: "",
-          error: "",
-          updatedAt: now()
-        }
-      }
+      logs: appendLogs(state.logs, [`[${now()}] ${labels[task]}：开始`]),
+      tasks: { ...state.tasks, [task]: { ...state.tasks[task], status: "running", phase: phases[task], message: "处理中…", progress: null, error: "", updatedAt: now() } },
+      ...(task === "import" ? { results: createResults(), workflow: { imported: false, cleaned: false, ldaDone: false, stmDone: false }, languageWorkflow: emptyLanguageWorkflow(), summary: emptySummary() } : {})
     }));
-
     try {
-      const response = await invoke<BackendResponse>("run_python_task", { task, payload: backendPayload(task, get()) });
+      const state = get();
+      const response = await invoke<BackendResponse>("run_python_task", { task, payload: backendPayload(task, state) });
       if (!response.ok) {
-        throw new Error([response.error?.message, response.error?.suggestion].filter(Boolean).join("；") || "Python bridge 返回失败");
+        const detail = response.error?.issues?.map((item) => item.message).filter(Boolean).join("；");
+        throw new Error(detail || response.error?.message || response.error?.suggestion || "任务失败");
       }
-
-      const completedSummary = taskSummary(task, response);
-      set((state) => {
-        const backendState = mergeBackendState(task, state, response);
-
-        return {
-          ...backendState,
-          results: {
-            ...state.results,
-            [task]: response.data ?? null
+      const data = response.data ?? {};
+      set((current) => {
+        const incomingSummary = response.state?.summary;
+        const incomingLdaTopics: Partial<Record<LanguageCode, number>> = incomingSummary?.ldaTopics ?? {};
+        const incomingLdaCoherence: Partial<Record<LanguageCode, number | null>> = incomingSummary?.ldaCoherence ?? {};
+        const incomingStmTopics: Partial<Record<LanguageCode, number>> = incomingSummary?.stmTopics ?? {};
+        const summary: WorkflowSummary = {
+          ...current.summary,
+          ...incomingSummary,
+          languageRows: { ...current.summary.languageRows, ...(incomingSummary?.languageRows ?? {}) },
+          totalTokens: { ...current.summary.totalTokens, ...(incomingSummary?.totalTokens ?? {}) },
+          uniqueWords: { ...current.summary.uniqueWords, ...(incomingSummary?.uniqueWords ?? {}) },
+          ldaTopics: {
+            zh: Number(incomingLdaTopics.zh ?? 0) > 0 ? Number(incomingLdaTopics.zh) : current.summary.ldaTopics.zh,
+            en: Number(incomingLdaTopics.en ?? 0) > 0 ? Number(incomingLdaTopics.en) : current.summary.ldaTopics.en
           },
-          logs: [...appendLog(state.logs, `${taskLabels[task]}：成功；${completedSummary}`), ...(response.logs ?? [])].slice(-200),
-          tasks: {
-            ...state.tasks,
-            [task]: {
-              ...state.tasks[task],
-              status: "succeeded",
-              phase: "已完成",
-              message: "Python 后端任务完成，结果摘要已同步到当前工作流",
-              progress: 100,
-              summary: completedSummary,
-              error: "",
-              updatedAt: now()
-            }
+          ldaCoherence: {
+            zh: incomingLdaCoherence.zh != null ? incomingLdaCoherence.zh : current.summary.ldaCoherence.zh,
+            en: incomingLdaCoherence.en != null ? incomingLdaCoherence.en : current.summary.ldaCoherence.en
+          },
+          stmTopics: {
+            zh: Number(incomingStmTopics.zh ?? 0) > 0 ? Number(incomingStmTopics.zh) : current.summary.stmTopics.zh,
+            en: Number(incomingStmTopics.en ?? 0) > 0 ? Number(incomingStmTopics.en) : current.summary.stmTopics.en
           }
+        };
+        const languageWorkflow = { ...current.languageWorkflow };
+        languages.forEach((language) => {
+          const incoming = response.state?.languageWorkflow?.[language];
+          languageWorkflow[language] = {
+            cleaned: languageWorkflow[language].cleaned || incoming?.cleaned === true,
+            ldaDone: languageWorkflow[language].ldaDone || incoming?.ldaDone === true,
+            stmDone: languageWorkflow[language].stmDone || incoming?.stmDone === true
+          };
+        });
+        const workflow = {
+          imported: current.workflow.imported || response.state?.workflow?.imported === true,
+          cleaned: current.workflow.cleaned || response.state?.workflow?.cleaned === true,
+          ldaDone: current.workflow.ldaDone || response.state?.workflow?.ldaDone === true,
+          stmDone: current.workflow.stmDone || response.state?.workflow?.stmDone === true
+        };
+        const results = { ...current.results };
+        if (task === "lda" || task === "stm" || task === "compare") {
+          const fallbackLanguage = task === "lda" ? current.configs.ldaLanguage : task === "stm" ? current.configs.stmLanguage : current.configs.compare.language;
+          const language: LanguageCode = data.language === "en" ? "en" : data.language === "zh" ? "zh" : fallbackLanguage;
+          results[task] = { ...results[task], [language]: data } as never;
+        } else {
+          results[task] = data as never;
+        }
+        const next = { ...current, summary, workflow, languageWorkflow, results };
+        return {
+          summary, workflow, languageWorkflow, results,
+          projectName: response.state?.session?.projectName ?? current.projectName,
+          outputDir: response.state?.session?.outputDir ?? current.outputDir,
+          logs: appendLogs(current.logs, response.logs),
+          tasks: { ...current.tasks, [task]: { ...current.tasks[task], status: "succeeded", phase: "已完成", message: taskSummary(task, next, data), summary: taskSummary(task, next, data), progress: 100, updatedAt: now() } }
         };
       });
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
+      const message = error instanceof Error ? error.message : String(error);
       set((state) => ({
-        logs: appendLog(state.logs, `${taskLabels[task]}：失败；${errorMessage}`),
-        tasks: {
-          ...state.tasks,
-          [task]: {
-            ...state.tasks[task],
-            status: "failed",
-            phase: "Python 后端调用失败",
-            message: "任务未完成",
-            progress: null,
-            summary: "",
-            error: errorMessage,
-            updatedAt: now()
-          }
-        }
+        logs: appendLogs(state.logs, [`[${now()}] ${labels[task]}失败：${message}`]),
+        tasks: { ...state.tasks, [task]: { ...state.tasks[task], status: "failed", phase: "执行失败", message, error: message, progress: null, updatedAt: now() } }
       }));
     }
   },
   checkStmEnvironment: async () => {
-    set((state) => ({
-      stmEnvironment: {
-        ...state.stmEnvironment,
-        checking: true,
-        message: "正在检查 R、rpy2 与 stm 包..."
-      },
-      logs: appendLog(state.logs, "STM 环境检查：开始")
-    }));
-
+    set({ stmEnvironment: { checking: true, available: null, message: "正在检查 R、rpy2 与 stm 包…", checkedAt: now() } });
     try {
-      const state = get();
-      const response = await invoke<BackendResponse>("run_python_task", {
-        task: "stm-check",
-        payload: { projectName: state.projectName, outputDir: state.outputDir }
-      });
-      if (!response.ok) {
-        throw new Error([response.error?.message, response.error?.suggestion].filter(Boolean).join("；") || "R 环境检查失败");
-      }
-
-      const available = response.data?.available === true;
-      const message = typeof response.data?.message === "string"
-        ? response.data.message
-        : available ? "R 环境可用" : "R 环境不可用";
-      set((current) => ({
-        stmEnvironment: {
-          checking: false,
-          available,
-          message,
-          checkedAt: now()
-        },
-        logs: appendLog(current.logs, `STM 环境检查：${available ? "可用" : "不可用"}`)
-      }));
+      const response = await invoke<BackendResponse>("run_python_task", { task: "stm-check", payload: {} });
+      if (!response.ok) throw new Error(response.error?.message || "环境检查失败");
+      set({ stmEnvironment: { checking: false, available: response.data?.available === true, message: String(response.data?.message ?? "检查完成"), checkedAt: now() } });
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      set((state) => ({
-        stmEnvironment: {
-          checking: false,
-          available: false,
-          message: errorMessage,
-          checkedAt: now()
-        },
-        logs: appendLog(state.logs, `STM 环境检查：失败；${errorMessage}`)
-      }));
+      set({ stmEnvironment: { checking: false, available: false, message: error instanceof Error ? error.message : String(error), checkedAt: now() } });
     }
-  },
-  failBackendTask: (task) => {
-    const errorMessage = "请先完成上一工作流步骤，或检查 Python bridge 返回的可恢复错误详情。";
-    set((state) => ({
-      logs: appendLog(state.logs, `${taskLabels[task]}：失败；${errorMessage}`),
-      tasks: {
-        ...state.tasks,
-        [task]: {
-          ...state.tasks[task],
-          status: "failed",
-          phase: "前置条件未满足",
-          message: "任务未启动",
-          progress: null,
-          summary: "",
-          error: errorMessage,
-          updatedAt: now()
-        }
-      }
-    }));
   },
   clearLogs: () => set({ logs: [] })
 }));

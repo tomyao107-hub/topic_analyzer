@@ -23,7 +23,7 @@ def build_topic_summary(df: pd.DataFrame, axis_field: str, topic_cols: List[str]
     work = df[[axis_field] + valid_topic_cols].dropna(subset=[axis_field]).copy()
     if work.empty:
         return pd.DataFrame()
-    if axis_field in ("pub_year", "time_index"):
+    if axis_field in ("year", "time_index"):
         work[axis_field] = pd.to_numeric(work[axis_field], errors="coerce")
         work = work.dropna(subset=[axis_field])
         if work.empty:
@@ -38,7 +38,7 @@ def build_topic_summary(df: pd.DataFrame, axis_field: str, topic_cols: List[str]
     return grouped.sort_values("_sort_key", kind="mergesort").drop(columns="_sort_key").reset_index(drop=True)
 
 
-def build_compare_summary(df: pd.DataFrame, axis_field: str = "newspaper", topic_cols: List[str] | None = None) -> Dict[str, Any]:
+def build_compare_summary(df: pd.DataFrame, axis_field: str = "source_name", topic_cols: List[str] | None = None) -> Dict[str, Any]:
     topic_cols = topic_cols or [column for column in df.columns if column.startswith("topic_")]
     summary = build_topic_summary(df, axis_field, topic_cols)
     return {
@@ -52,7 +52,10 @@ def representative_articles(df: pd.DataFrame, limit_per_topic: int = 3) -> Dict[
     """按主题概率返回每个主题最具代表性的文章。"""
     if df is None or df.empty:
         return {}
-    identity_cols = [column for column in ("doc_id", "article_title", "newspaper", "pub_date", "author", "genre", "text") if column in df.columns]
+    identity_cols = [
+        column for column in ("doc_id", "title", "source_name", "date", "creator", "genre", "language", "text")
+        if column in df.columns
+    ]
     result: Dict[str, List[Dict[str, Any]]] = {}
     for topic_col in (column for column in df.columns if column.startswith("topic_")):
         columns = identity_cols + [topic_col]

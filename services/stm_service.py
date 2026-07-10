@@ -152,7 +152,7 @@ def train_stm(
     merged_df: pd.DataFrame,
     tokens_list: List[List[str]],
     num_topics: int = 10,
-    prevalence_formula: str = "~ newspaper",
+    prevalence_formula: str = "~ 1",
     content_covariate: Optional[str] = None,
     seed: int = 42,
     max_em_its: int = 75,
@@ -172,6 +172,10 @@ def train_stm(
     vocab_list = sorted([w for w, f in word_freq.items() if f >= 2])
     vocab_set  = set(vocab_list)
     word2id    = {w: i for i, w in enumerate(vocab_list)}
+    # Windows/R 的系统区域设置可能把中文词表全部转成 "??"。R 侧只需要
+    # 唯一标签来维持词元索引，因此使用 ASCII 安全标签训练，提取结果后再映射回原词。
+    r_vocab_list = [f"term_{index:06d}" for index in range(len(vocab_list))]
+    r_to_original = dict(zip(r_vocab_list, vocab_list))
 
     if not vocab_list:
         raise ValueError("词汇表为空，请检查分词和词频过滤设置")
@@ -199,15 +203,16 @@ def train_stm(
     logger.info(f"有效文档：{len(doc_list_r)}，词汇量：{len(vocab_list)}")
 
     r_docs  = ro.ListVector({str(i + 1): d for i, d in enumerate(doc_list_r)})
-    r_vocab = ro.StrVector(vocab_list)
+    r_vocab = ro.StrVector(r_vocab_list)
 
     sub_df = merged_df.iloc[valid_indices].reset_index(drop=True)
     formula_str = _validate_stm_formula_metadata(sub_df, prevalence_formula, role="prevalence")
 
     content_line = ""
     if content_covariate and content_covariate.strip():
+        content_name = content_covariate.strip().replace("`", "")
         content_formula = _validate_stm_formula_metadata(
-            sub_df, f"~ {content_covariate.strip()}", role="content"
+            sub_df, f"~ `{content_name}`", role="content"
         )
         content_line = f"content = {content_formula},"
 
@@ -241,6 +246,13 @@ def train_stm(
     label_word_count = min(20, len(vocab_list))
     ro.r(f"stm_labels <- labelTopics(stm_model, n={label_word_count})")
     topics = _extract_stm_topics(ro.globalenv["stm_labels"], num_topics)
+    for topic in topics:
+        topic["words"] = [
+            (r_to_original.get(word, word), weight)
+            for word, weight in topic.get("words", [])
+        ]
+        visible_words = [word for word, _ in topic["words"][:5]]
+        topic["label"] = f"主题{topic['topic_id'] + 1}: " + (" ".join(visible_words) if visible_words else "（无主题词）")
 
     # 文档主题分布
     logger.info("提取文档主题分布...")
@@ -303,10 +315,8 @@ def _make_doc_topics_df(theta: np.ndarray, sub_df: pd.DataFrame,
         d["dominant_topic"] = f"主题{int(np.argmax(row)) + 1}"
         rows.append(d)
     df = pd.DataFrame(rows)
-    meta_cols = [c for c in [
-        "doc_id", "article_title", "newspaper", "pub_date",
-        "pub_year", "pub_month", "time_index", "genre"
-    ] if c in sub_df.columns]
+    excluded = {"text", "cleaned_text", "tokens", "token_count"}
+    meta_cols = [c for c in sub_df.columns if c not in excluded]
     return pd.concat([sub_df[meta_cols].reset_index(drop=True), df], axis=1)
 
 
@@ -378,7 +388,9 @@ def _extract_formula_variables(formula: str) -> List[str]:
     if not formula.startswith("~"):
         formula = "~ " + formula
 
-    tokens = re.findall(r"[A-Za-z_][A-Za-z0-9_]*", formula)
+    backticked = re.findall(r"`([^`]+)`", formula)
+    remainder = re.sub(r"`[^`]+`", " ", formula)
+    tokens = backticked + re.findall(r"[^\W\d]\w*", remainder, flags=re.UNICODE)
     ignored = {"s", "c", "I", "log", "factor", "as", "ns", "bs"}
     vars_found = []
     for token in tokens:

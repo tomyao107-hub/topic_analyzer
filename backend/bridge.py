@@ -1,3 +1,4 @@
+"""Tauri 与 Python 分析能力之间的 v2 单表/双语 JSON 桥。"""
 import argparse
 import contextlib
 import json
@@ -11,78 +12,21 @@ from typing import Any, Dict, List
 import pandas as pd
 
 from models.app_state import get_state, reset_state
-from services.clean_service import CleanOptions, clean_text, get_default_stopwords, tokenize_texts
+from services.clean_service import CleanOptions, clean_text, get_default_stopwords, tokenize_documents
 from services.compare_service import build_compare_summary, representative_articles
-from services.data_service import detect_meta_columns, detect_text_columns, load_file, merge_tables
-from services.export_service import list_export_items
+from services.data_service import DocumentValidationError, load_documents
 from services.lda_service import build_corpus, compute_coherence, get_doc_topics, get_topics, open_pyldavis, train_lda
 from services.stm_service import _analyze_stm_column, check_r_environment, train_stm
 
-
-SESSION_PAYLOAD_KEYS = (
-    "metadataPath",
-    "textPath",
-    "metadataIdField",
-    "textIdField",
-    "options",
-    "stopwords",
-    "customDictPath",
-    "numTopics",
-    "passes",
-    "iterations",
-    "randomState",
-    "minDocFreq",
-    "maxDocFreqRatio",
-    "prevalenceFormula",
-    "contentCovariate",
-    "maxEmIterations",
-    "model",
-    "axisField",
-    "representativeLimit",
-    "chartType",
-    "exportItems",
-    "ldaConfig",
-    "stmConfig",
-    "useDefaultStopwords",
-    "stopwordsPath",
-    "genre",
-    "newspaper",
-    "year",
-    "topicField",
-    "metricField",
-    "outputDir",
-    "projectName",
-)
+LANGUAGES = ("zh", "en")
+LANGUAGE_LABELS = {"zh": "中文", "en": "英文"}
 
 
 def _remember_session_payload(payload: Dict[str, Any]) -> None:
-    """记录可 JSON 序列化的工作流输入，供下一个 bridge 进程重建状态。"""
     state = get_state()
-    for key in SESSION_PAYLOAD_KEYS:
-        if key in payload:
-            state.session_payload[key] = payload[key]
-
-
-def _sample_metadata() -> pd.DataFrame:
-    return pd.DataFrame([
-        {"doc_id": "001", "article_title": "市场与工厂", "newspaper": "申报", "pub_date": "1931-01-05", "genre": "新闻"},
-        {"doc_id": "002", "article_title": "学校新制", "newspaper": "大公报", "pub_date": "1932-03-12", "genre": "教育"},
-        {"doc_id": "003", "article_title": "城市交通", "newspaper": "申报", "pub_date": "1933-08-18", "genre": "评论"},
-        {"doc_id": "004", "article_title": "乡村建设", "newspaper": "民国日报", "pub_date": "1934-11-02", "genre": "新闻"},
-        {"doc_id": "005", "article_title": "金融改革", "newspaper": "大公报", "pub_date": "1935-06-22", "genre": "财经"},
-        {"doc_id": "006", "article_title": "公共卫生", "newspaper": "申报", "pub_date": "1936-09-09", "genre": "社会"},
-    ])
-
-
-def _sample_text() -> pd.DataFrame:
-    return pd.DataFrame([
-        {"doc_id": "001", "text": "市场 贸易 工厂 工人 生产 商品 价格 市场 工厂 贸易"},
-        {"doc_id": "002", "text": "学校 教育 学生 课程 教师 新制 学校 教育 课程"},
-        {"doc_id": "003", "text": "城市 交通 道路 公共 汽车 市政 城市 道路 交通"},
-        {"doc_id": "004", "text": "乡村 建设 农民 合作 水利 土地 乡村 建设 农民"},
-        {"doc_id": "005", "text": "金融 银行 货币 改革 市场 价格 银行 金融"},
-        {"doc_id": "006", "text": "公共 卫生 医院 疾病 城市 防疫 卫生 公共"},
-    ])
+    state.session_payload.update(payload)
+    state.project_name = str(payload.get("projectName") or state.project_name)
+    state.output_dir = str(payload.get("outputDir") or state.output_dir)
 
 
 def _number(value: Any) -> Any:
@@ -91,442 +35,7 @@ def _number(value: Any) -> Any:
     return value
 
 
-def _state_snapshot() -> Dict[str, Any]:
-    state = get_state()
-    return {
-        "workflow": {
-            "imported": state.step_imported,
-            "merged": state.step_merged,
-            "cleaned": state.step_cleaned,
-            "ldaDone": state.step_lda_done,
-            "stmDone": state.step_stm_done,
-        },
-        "session": {
-            "projectName": state.project_name,
-            "outputDir": state.output_dir,
-            "payload": state.session_payload,
-        },
-        "summary": {
-            "metadataRows": 0 if state.metadata_df is None else len(state.metadata_df),
-            "textRows": 0 if state.text_df is None else len(state.text_df),
-            "mergedRows": 0 if state.merged_df is None else len(state.merged_df),
-            "unmatchedMetaRows": 0 if state.unmatched_meta is None else len(state.unmatched_meta),
-            "unmatchedTextRows": 0 if state.unmatched_text is None else len(state.unmatched_text),
-            "cleanDocuments": 0 if state.cleaned_df is None else len(state.cleaned_df),
-            "totalTokens": 0 if not state.tokens_list else sum(len(tokens) for tokens in state.tokens_list),
-            "uniqueWords": 0 if not state.tokens_list else len({word for tokens in state.tokens_list for word in tokens}),
-            "ldaTopics": 0 if not state.lda_topics else len(state.lda_topics),
-            "ldaCoherence": _number(state.lda_coherence),
-            "stmTopics": 0 if not state.stm_topics else len(state.stm_topics),
-            "exportFiles": 0,
-        },
-    }
-
-
-def _load_or_sample(role: str, path: str | None) -> pd.DataFrame:
-    if path:
-        return load_file(path)
-    return _sample_metadata() if role == "metadata" else _sample_text()
-
-
-def _ensure_import(payload: Dict[str, Any], allow_sample: bool = False) -> Dict[str, Any]:
-    state = get_state()
-    if state.merged_df is not None:
-        return _import_result()
-
-    metadata_path = payload.get("metadataPath") or payload.get("metadata_path")
-    text_path = payload.get("textPath") or payload.get("text_path")
-    if not allow_sample and (not metadata_path or not text_path):
-        raise ValueError("未找到已导入的真实文件，请先完成数据导入后再运行此任务")
-    meta_df = _load_or_sample("metadata", metadata_path)
-    text_df = _load_or_sample("text", text_path)
-    meta_col_map, meta_missing, _ = detect_meta_columns(meta_df)
-    text_col_map, text_missing, _ = detect_text_columns(text_df)
-    metadata_id_field = payload.get("metadataIdField") or payload.get("metadata_id_field")
-    text_id_field = payload.get("textIdField") or payload.get("text_id_field")
-
-    if metadata_id_field and metadata_id_field in meta_df.columns:
-        meta_col_map["doc_id"] = metadata_id_field
-        meta_missing = [field for field in meta_missing if field != "doc_id"]
-    if text_id_field and text_id_field in text_df.columns:
-        text_col_map["doc_id"] = text_id_field
-        text_missing = [field for field in text_missing if field != "doc_id"]
-
-    if meta_missing or text_missing:
-        missing = ", ".join(meta_missing + text_missing)
-        raise ValueError(f"缺少必填字段：{missing}")
-
-    merged_df, unmatched_meta, unmatched_text = merge_tables(meta_df, text_df, meta_col_map, text_col_map)
-    state.metadata_df = meta_df
-    state.text_df = text_df
-    state.meta_col_map = meta_col_map
-    state.text_col_map = text_col_map
-    state.merged_df = merged_df
-    state.unmatched_meta = unmatched_meta
-    state.unmatched_text = unmatched_text
-    state.step_imported = True
-    state.step_merged = True
-    return _import_result()
-
-
-def _unique_strings(df: pd.DataFrame, column: str) -> List[str]:
-    if df is None or column not in df.columns:
-        return []
-    return sorted({str(value).strip() for value in df[column].dropna() if str(value).strip()})
-
-
-def _covariate_items(df: pd.DataFrame) -> List[Dict[str, Any]]:
-    items = []
-    if df is None:
-        return items
-    excluded = {"text", "doc_id", "tokens", "cleaned_text", "token_count"}
-    for column in df.columns:
-        if str(column) in excluded:
-            continue
-        ok, reason = _analyze_stm_column(df, column)
-        items.append({"field": str(column), "available": ok, "reason": reason})
-    return items
-
-
-def _import_result() -> Dict[str, Any]:
-    state = get_state()
-    meta_df = state.metadata_df
-    text_df = state.text_df
-    merged_df = state.merged_df
-    return {
-        "metadataRows": len(meta_df),
-        "textRows": len(text_df),
-        "mergedRows": len(merged_df),
-        "unmatchedMetaRows": 0 if state.unmatched_meta is None else len(state.unmatched_meta),
-        "unmatchedTextRows": 0 if state.unmatched_text is None else len(state.unmatched_text),
-        "metadataColumns": [str(column) for column in meta_df.columns],
-        "textColumns": [str(column) for column in text_df.columns],
-        "mergedColumns": [str(column) for column in merged_df.columns],
-        "metadataMapping": dict(state.meta_col_map),
-        "textMapping": dict(state.text_col_map),
-        "preview": _preview_dataframe("merged", merged_df, {"page": 1, "pageSize": 10}),
-        "genres": _unique_strings(merged_df, "genre"),
-        "newspapers": _unique_strings(merged_df, "newspaper"),
-        "years": _unique_strings(merged_df, "pub_year"),
-        "covariates": _covariate_items(merged_df),
-    }
-
-
-def _clean_options(payload: Dict[str, Any]) -> CleanOptions:
-    options = CleanOptions()
-    values = payload.get("options") or {}
-    options.remove_empty = bool(values.get("removeEmpty", True))
-    options.remove_duplicates = bool(values.get("removeDuplicates", True))
-    options.ocr_clean = bool(values.get("ocrClean", True))
-    options.remove_punct = bool(values.get("removePunct", True))
-    options.remove_numbers = bool(values.get("removeNumbers", True))
-    options.traditional_to_simplified = bool(values.get("traditionalToSimplified", False))
-    options.min_text_length = int(values.get("minTextLength", 10))
-    options.min_token_freq = int(values.get("minTokenFreq", 1))
-    options.min_doc_freq = int(values.get("minDocFreq", 2))
-    options.max_doc_freq_ratio = float(values.get("maxDocFreqRatio", 0.95))
-    return options
-
-
-def _ensure_clean(payload: Dict[str, Any]) -> Dict[str, Any]:
-    state = get_state()
-    if state.tokens_list:
-        return _clean_result()
-
-    _ensure_import(payload)
-    options = _clean_options(payload)
-    stopwords = set(payload.get("stopwords") or [])
-    if bool(payload.get("useDefaultStopwords", True)):
-        stopwords |= get_default_stopwords()
-    work_df = state.merged_df.copy()
-    if options.remove_duplicates:
-        work_df = work_df.drop_duplicates(subset=["text"], keep="first").reset_index(drop=True)
-    texts = work_df["text"].fillna("").astype(str).tolist()
-    tokens_list, stats = tokenize_texts(texts, options, stopwords, payload.get("customDictPath"))
-    if options.min_token_freq > 1:
-        frequencies = Counter(word for tokens in tokens_list for word in tokens)
-        tokens_list = [
-            [word for word in tokens if frequencies[word] >= options.min_token_freq]
-            for tokens in tokens_list
-        ]
-        stats["total_tokens"] = sum(len(tokens) for tokens in tokens_list)
-        stats["unique_words"] = len({word for tokens in tokens_list for word in tokens})
-    cleaned_df = work_df.copy()
-    cleaned_df["cleaned_text"] = [clean_text(text, options) for text in texts]
-    cleaned_df["tokens"] = [" ".join(tokens) for tokens in tokens_list]
-    cleaned_df["token_count"] = [len(tokens) for tokens in tokens_list]
-    if options.remove_empty:
-        keep = [len(tokens) > 0 for tokens in tokens_list]
-        cleaned_df = cleaned_df[keep].reset_index(drop=True)
-        tokens_list = [tokens for tokens in tokens_list if tokens]
-
-    state.cleaned_df = cleaned_df
-    state.tokens_list = tokens_list
-    state.stopwords = stopwords
-    state.step_cleaned = True
-    return _clean_result(stats)
-
-
-def _clean_result(stats: Dict[str, Any] | None = None) -> Dict[str, Any]:
-    state = get_state()
-    tokens_list = state.tokens_list or []
-    stats = stats or {
-        "total_tokens": sum(len(tokens) for tokens in tokens_list),
-        "unique_words": len({word for tokens in tokens_list for word in tokens}),
-    }
-    preview = _preview_dataframe("cleaned", state.cleaned_df, {"page": 1, "pageSize": 300})
-    return {
-        "documents": len(tokens_list),
-        "totalDocuments": 0 if state.merged_df is None else len(state.merged_df),
-        "totalTokens": stats["total_tokens"],
-        "uniqueWords": stats["unique_words"],
-        "stopwordCount": len(state.stopwords),
-        "preview": preview,
-    }
-
-
-def _filter_model_documents(state, genre: str, min_tokens: int) -> tuple[pd.DataFrame, List[List[str]]]:
-    model_df = state.cleaned_df.copy()
-    tokens_list = list(state.tokens_list or [])
-    if genre and genre not in {"全部文类", "全部", "__all__"}:
-        if "genre" not in model_df.columns:
-            raise ValueError("当前数据没有文类字段，无法按文类筛选")
-        mask = model_df["genre"].fillna("").astype(str) == str(genre)
-        indices = [index for index, keep in enumerate(mask.tolist()) if keep]
-        model_df = model_df.loc[mask].reset_index(drop=True)
-        tokens_list = [tokens_list[index] for index in indices]
-    valid = [index for index, tokens in enumerate(tokens_list) if len(tokens) >= min_tokens]
-    if not valid:
-        raise ValueError("当前文类没有有效分词文档，请调整文类或清洗参数")
-    return model_df.iloc[valid].reset_index(drop=True), [tokens_list[index] for index in valid]
-
-
-def _run_lda(payload: Dict[str, Any]) -> Dict[str, Any]:
-    state = get_state()
-    _ensure_clean(payload)
-    values = payload.get("ldaConfig") or payload
-    model_df, model_tokens = _filter_model_documents(state, str(values.get("genre") or "全部文类"), 3)
-    dictionary, corpus, filtered_tokens = build_corpus(
-        model_tokens,
-        min_doc_freq=int(values.get("minDocFreq", 2)),
-        max_doc_freq_ratio=float(values.get("maxDocFreqRatio", 0.95)),
-    )
-    model = train_lda(
-        corpus,
-        dictionary,
-        num_topics=int(values.get("numTopics", 10)),
-        passes=int(values.get("passes", 20)),
-        iterations=int(values.get("iterations", 400)),
-        random_state=int(values.get("randomState", 42)),
-    )
-    topics = get_topics(model, n_words=20)
-    coherence = compute_coherence(model, corpus, dictionary, filtered_tokens)
-    doc_topics = get_doc_topics(model, corpus, model_df, list(range(len(filtered_tokens))))
-    state.lda_model = model
-    state.lda_dictionary = dictionary
-    state.lda_corpus = corpus
-    state.lda_topics = topics
-    state.lda_doc_topics = doc_topics
-    state.lda_coherence = coherence
-    state.step_lda_done = True
-    return {
-        "topicCount": len(topics),
-        "coherence": _number(coherence),
-        "topics": topics,
-        "documentTopics": _preview_dataframe("ldaDocTopics", doc_topics, {"page": 1, "pageSize": 200}),
-        "genre": str(values.get("genre") or "全部文类"),
-    }
-
-
-def _run_stm_check() -> Dict[str, Any]:
-    with contextlib.redirect_stdout(sys.stderr):
-        ok, message = check_r_environment()
-    state = get_state()
-    state.r_available = ok
-    return {"available": ok, "message": message}
-
-
-def _open_lda_visualization(payload: Dict[str, Any]) -> Dict[str, Any]:
-    _run_lda(payload)
-    state = get_state()
-    output_dir = str(payload.get("outputDir") or state.output_dir or os.path.expanduser("~"))
-    path = open_pyldavis(state.lda_model, state.lda_corpus, state.lda_dictionary, output_dir)
-    state.output_dir = output_dir
-    return {"path": path, "message": "pyLDAvis 已生成并在浏览器中打开"}
-
-
-def _run_stm(payload: Dict[str, Any]) -> Dict[str, Any]:
-    state = get_state()
-    _ensure_clean(payload)
-    values = payload.get("stmConfig") or payload
-    model_df, model_tokens = _filter_model_documents(state, str(values.get("genre") or "全部文类"), 2)
-    r_model, topics, doc_topics, prevalence = train_stm(
-        model_df,
-        model_tokens,
-        num_topics=int(values.get("numTopics", 10)),
-        prevalence_formula=str(values.get("prevalenceFormula") or "~ newspaper"),
-        content_covariate=str(values.get("contentCovariate") or "").strip() or None,
-        seed=int(values.get("randomState", 42)),
-        max_em_its=int(values.get("maxEmIterations", 75)),
-    )
-    state.stm_result = r_model
-    state.stm_topics = topics
-    state.stm_doc_topics = doc_topics
-    state.stm_prevalence = prevalence
-    state.r_available = True
-    state.step_stm_done = True
-    return {
-        "topicCount": len(topics),
-        "documents": len(doc_topics),
-        "topics": topics,
-        "documentTopics": _preview_dataframe("stmDocTopics", doc_topics, {"page": 1, "pageSize": 200}),
-        "prevalence": _json_records(prevalence),
-        "prevalenceColumns": [] if prevalence is None else [str(column) for column in prevalence.columns],
-        "genre": str(values.get("genre") or "全部文类"),
-    }
-
-
-def _run_compare(payload: Dict[str, Any]) -> Dict[str, Any]:
-    state = get_state()
-    if str(payload.get("model") or "lda").lower() == "stm":
-        if state.stm_doc_topics is None:
-            _run_stm(payload)
-        doc_topics = state.stm_doc_topics
-    else:
-        _run_lda(payload)
-        doc_topics = state.lda_doc_topics
-    rows = 0 if doc_topics is None else len(doc_topics)
-    groups = [] if doc_topics is None or "newspaper" not in doc_topics else sorted(doc_topics["newspaper"].dropna().astype(str).unique().tolist())
-    return {"rows": rows, "groups": groups, "representativeArticles": min(rows, 3)}
-
-
-def _run_export(payload: Dict[str, Any]) -> Dict[str, Any]:
-    state = get_state()
-    default_items = {
-        "merged_data", "cleaned_records", "cleaned_corpus",
-        "lda_topic_word", "lda_doc_topic", "lda_coherence",
-        "stm_topic_word", "stm_doc_topic", "stm_prevalence", "session_config",
-    }
-    requested = payload.get("exportItems")
-    selected = default_items if requested is None else {str(item) for item in requested}
-    if not selected:
-        raise ValueError("请至少选择一个导出项目")
-
-    _ensure_import(payload)
-    errors: List[Dict[str, str]] = []
-
-    def prepare(keys, action, label):
-        requested_keys = selected & set(keys)
-        if not requested_keys:
-            return
-        try:
-            action()
-        except Exception as exc:
-            for key in sorted(requested_keys):
-                errors.append({"key": key, "label": label, "error": str(exc)})
-            selected.difference_update(requested_keys)
-
-    prepare({"cleaned_records", "cleaned_corpus"}, lambda: _ensure_clean(payload), "清洗结果")
-    prepare({"lda_topic_word", "lda_doc_topic", "lda_coherence"}, lambda: _run_lda(payload), "LDA 结果")
-    prepare({"stm_topic_word", "stm_doc_topic", "stm_prevalence"}, lambda: _run_stm(payload), "STM 结果")
-
-    output_dir = str(payload.get("outputDir") or "").strip()
-    if not output_dir:
-        raise ValueError("请选择导出目录")
-    project_name = payload.get("projectName") or state.project_name
-    os.makedirs(output_dir, exist_ok=True)
-    state.output_dir = output_dir
-    state.project_name = project_name
-    exported: List[str] = []
-
-    def write_item(key: str, filename: str, writer, available: bool = True):
-        if key not in selected:
-            return
-        if not available:
-            errors.append({"key": key, "label": filename, "error": "尚未生成对应结果"})
-            return
-        try:
-            writer()
-            exported.append(filename)
-        except Exception as exc:
-            errors.append({"key": key, "label": filename, "error": str(exc)})
-
-    write_item(
-        "merged_data", "merged_data.csv",
-        lambda: state.merged_df.to_csv(os.path.join(output_dir, "merged_data.csv"), index=False, encoding="utf-8-sig"),
-        state.merged_df is not None,
-    )
-    write_item(
-        "cleaned_records", "cleaned_records.csv",
-        lambda: state.cleaned_df.to_csv(os.path.join(output_dir, "cleaned_records.csv"), index=False, encoding="utf-8-sig"),
-        state.cleaned_df is not None,
-    )
-
-    def write_corpus():
-        with open(os.path.join(output_dir, "tokens_corpus.txt"), "w", encoding="utf-8") as f:
-            for tokens in state.tokens_list:
-                f.write(" ".join(tokens) + "\n")
-
-    write_item("cleaned_corpus", "tokens_corpus.txt", write_corpus, bool(state.tokens_list))
-
-    def write_lda_topics():
-        rows = []
-        for topic in state.lda_topics:
-            for rank, (word, probability) in enumerate(topic["words"], start=1):
-                rows.append({"topic_id": topic["topic_id"], "rank": rank, "word": word, "probability": round(probability, 6)})
-        pd.DataFrame(rows).to_csv(os.path.join(output_dir, "lda_topic_word.csv"), index=False, encoding="utf-8-sig")
-
-    write_item("lda_topic_word", "lda_topic_word.csv", write_lda_topics, bool(state.lda_topics))
-    write_item(
-        "lda_doc_topic", "lda_doc_topic.csv",
-        lambda: state.lda_doc_topics.to_csv(os.path.join(output_dir, "lda_doc_topic.csv"), index=False, encoding="utf-8-sig"),
-        state.lda_doc_topics is not None,
-    )
-
-    def write_lda_coherence():
-        with open(os.path.join(output_dir, "lda_coherence.json"), "w", encoding="utf-8") as f:
-            json.dump({"coherence_c_v": state.lda_coherence}, f, ensure_ascii=False, indent=2)
-
-    write_item("lda_coherence", "lda_coherence.json", write_lda_coherence, state.lda_coherence is not None)
-
-    def write_stm_topics():
-        rows = []
-        for topic in state.stm_topics:
-            for rank, (word, _) in enumerate(topic["words"], start=1):
-                rows.append({"topic_id": topic["topic_id"], "rank": rank, "word": word})
-        pd.DataFrame(rows).to_csv(os.path.join(output_dir, "stm_topic_word.csv"), index=False, encoding="utf-8-sig")
-
-    write_item("stm_topic_word", "stm_topic_word.csv", write_stm_topics, bool(state.stm_topics))
-    write_item(
-        "stm_doc_topic", "stm_doc_topic.csv",
-        lambda: state.stm_doc_topics.to_csv(os.path.join(output_dir, "stm_doc_topic.csv"), index=False, encoding="utf-8-sig"),
-        state.stm_doc_topics is not None,
-    )
-    write_item(
-        "stm_prevalence", "stm_topic_prevalence.csv",
-        lambda: state.stm_prevalence.to_csv(os.path.join(output_dir, "stm_topic_prevalence.csv"), index=False, encoding="utf-8-sig"),
-        state.stm_prevalence is not None and not state.stm_prevalence.empty,
-    )
-
-    def write_session_config():
-        session_config = dict(state.session_payload)
-        session_config.update({
-            "project_name": state.project_name,
-            "exported_at": datetime.now().isoformat(),
-            "article_count": 0 if state.merged_df is None else len(state.merged_df),
-            "lda_done": state.step_lda_done,
-            "stm_done": state.step_stm_done,
-            "output_dir": output_dir,
-        })
-        with open(os.path.join(output_dir, "session_config.json"), "w", encoding="utf-8") as f:
-            json.dump(session_config, f, ensure_ascii=False, indent=2)
-
-    write_item("session_config", "session_config.json", write_session_config)
-    return {"outputDir": output_dir, "exported": exported, "errors": errors, "count": len(exported)}
-
-
 def _json_records(df: pd.DataFrame) -> List[Dict[str, Any]]:
-    """通过 pandas JSON 编码统一处理日期、NaN 与 numpy 标量。"""
     if df is None or df.empty:
         return []
     return json.loads(df.to_json(orient="records", date_format="iso", force_ascii=False))
@@ -549,146 +58,576 @@ def _preview_dataframe(name: str, df: pd.DataFrame, payload: Dict[str, Any]) -> 
     }
 
 
-def _table_preview(payload: Dict[str, Any]) -> Dict[str, Any]:
-    table = str(payload.get("table") or payload.get("source") or "merged")
+def _language_counts(df: pd.DataFrame | None) -> Dict[str, int]:
+    if df is None or "language" not in df.columns:
+        return {language: 0 for language in LANGUAGES}
+    values = df["language"].value_counts()
+    return {language: int(values.get(language, 0)) for language in LANGUAGES}
+
+
+def _state_snapshot() -> Dict[str, Any]:
     state = get_state()
-    if table in {"metadata", "text", "merged"}:
-        _ensure_import(payload)
-    elif table == "cleaned":
-        _ensure_clean(payload)
-    elif table == "ldaDocTopics":
-        _run_lda(payload)
-    elif table == "stmDocTopics":
-        _run_stm(payload)
-    else:
-        raise ValueError(f"不支持的表格预览来源：{table}")
-    frames = {
-        "metadata": state.metadata_df,
-        "text": state.text_df,
-        "merged": state.merged_df,
-        "cleaned": state.cleaned_df,
-        "ldaDocTopics": state.lda_doc_topics,
-        "stmDocTopics": state.stm_doc_topics,
+    lda_topics = {
+        language: len(state.lda_results.get(language, {}).get("topics") or [])
+        for language in LANGUAGES
     }
-    return _preview_dataframe(table, frames[table], payload)
-
-
-def _clean_preview(payload: Dict[str, Any]) -> Dict[str, Any]:
-    _ensure_clean(payload)
-    state = get_state()
-    preview = _preview_dataframe("cleaned", state.cleaned_df, payload)
-    preview["documents"] = len(state.tokens_list or [])
-    preview["tokenColumn"] = "tokens"
-    return preview
-
-
-def _lda_result(payload: Dict[str, Any]) -> Dict[str, Any]:
-    _run_lda(payload)
-    state = get_state()
+    lda_coherence = {
+        language: _number(state.lda_results.get(language, {}).get("coherence"))
+        for language in LANGUAGES
+    }
+    stm_topics = {
+        language: len(state.stm_results.get(language, {}).get("topics") or [])
+        for language in LANGUAGES
+    }
+    token_counts = {language: 0 for language in LANGUAGES}
+    unique_words = {language: set() for language in LANGUAGES}
+    if state.cleaned_df is not None and state.tokens_list is not None:
+        for language, tokens in zip(state.cleaned_df["language"].tolist(), state.tokens_list):
+            token_counts[language] += len(tokens)
+            unique_words[language].update(tokens)
     return {
-        "topics": state.lda_topics or [],
-        "coherence": _number(state.lda_coherence),
-        "documentTopics": _preview_dataframe("ldaDocTopics", state.lda_doc_topics, payload),
+        "workflow": {
+            "imported": state.step_imported,
+            "cleaned": state.step_cleaned,
+            "ldaDone": bool(state.lda_done_languages),
+            "stmDone": bool(state.stm_done_languages),
+        },
+        "languageWorkflow": {
+            language: {
+                "cleaned": language in state.cleaned_languages,
+                "ldaDone": language in state.lda_done_languages,
+                "stmDone": language in state.stm_done_languages,
+            }
+            for language in LANGUAGES
+        },
+        "session": {
+            "schemaVersion": 2,
+            "projectName": state.project_name,
+            "outputDir": state.output_dir,
+            "payload": state.session_payload,
+        },
+        "summary": {
+            "documentRows": 0 if state.documents_df is None else len(state.documents_df),
+            "languageRows": _language_counts(state.documents_df),
+            "cleanDocuments": 0 if state.cleaned_df is None else len(state.cleaned_df),
+            "totalTokens": token_counts,
+            "uniqueWords": {key: len(value) for key, value in unique_words.items()},
+            "ldaTopics": lda_topics,
+            "ldaCoherence": lda_coherence,
+            "stmTopics": stm_topics,
+            "exportFiles": 0,
+        },
     }
 
 
-def _stm_covariates(payload: Dict[str, Any]) -> Dict[str, Any]:
-    _ensure_import(payload)
+def _ensure_import(payload: Dict[str, Any]) -> Dict[str, Any]:
     state = get_state()
-    df = state.merged_df
-    return {"covariates": _covariate_items(df)}
+    if state.documents_df is not None:
+        return _import_result()
+    data_path = str(payload.get("dataPath") or payload.get("data_path") or "").strip()
+    if not data_path:
+        raise ValueError("未找到 v2 文献表，请先选择包含 doc_id、text、language 的 CSV/Excel 文件")
+    mapping = payload.get("fieldMapping") or payload.get("field_mapping") or {}
+    documents, detected, unrecognized = load_documents(data_path, mapping)
+    state.documents_df = documents
+    state.document_col_map = detected
+    state.step_imported = True
+    state.session_payload["unrecognizedColumns"] = unrecognized
+    return _import_result()
+
+
+def _unique_strings(df: pd.DataFrame, column: str) -> List[str]:
+    if df is None or column not in df.columns:
+        return []
+    return sorted({str(value).strip() for value in df[column].dropna() if str(value).strip()})
+
+
+def _covariate_items(df: pd.DataFrame) -> List[Dict[str, Any]]:
+    excluded = {"doc_id", "text", "language", "tokens", "cleaned_text", "token_count"}
+    items = []
+    if df is None:
+        return items
+    for column in df.columns:
+        if str(column) in excluded:
+            continue
+        ok, reason = _analyze_stm_column(df, column)
+        items.append({"field": str(column), "available": ok, "reason": reason})
+    return items
+
+
+def _metadata_fields(df: pd.DataFrame) -> List[Dict[str, Any]]:
+    excluded = {"doc_id", "text", "language", "tokens", "cleaned_text", "token_count"}
+    fields = []
+    for column in df.columns:
+        if column in excluded:
+            continue
+        values = _unique_strings(df, column)
+        fields.append({"field": str(column), "values": values[:200], "uniqueCount": len(values)})
+    return fields
+
+
+def _import_result() -> Dict[str, Any]:
+    state = get_state()
+    documents = state.documents_df
+    return {
+        "documentRows": len(documents),
+        "languageRows": _language_counts(documents),
+        "columns": [str(column) for column in documents.columns],
+        "mapping": dict(state.document_col_map),
+        "unrecognizedColumns": list(state.session_payload.get("unrecognizedColumns") or []),
+        "preview": _preview_dataframe("documents", documents, {"page": 1, "pageSize": 10}),
+        "metadataFields": _metadata_fields(documents),
+        "covariates": _covariate_items(documents),
+    }
+
+
+def _clean_values(payload: Dict[str, Any]) -> Dict[str, Any]:
+    return payload.get("cleanConfig") or payload.get("options") or payload
+
+
+def _clean_options(payload: Dict[str, Any]) -> CleanOptions:
+    values = _clean_values(payload)
+    zh_values = values.get("zh") or {}
+    en_values = values.get("en") or {}
+    options = CleanOptions()
+    options.remove_empty = bool(values.get("removeEmpty", True))
+    options.remove_duplicates = bool(values.get("removeDuplicates", True))
+    options.ocr_clean = bool(values.get("ocrClean", True))
+    options.remove_punct = bool(values.get("removePunct", True))
+    options.remove_numbers = bool(values.get("removeNumbers", True))
+    options.min_text_length = int(values.get("minTextLength", 10))
+    options.min_token_freq = int(values.get("minTokenFreq", 1))
+    options.min_doc_freq = int(values.get("minDocFreq", 2))
+    options.max_doc_freq_ratio = float(values.get("maxDocFreqRatio", 0.95))
+    options.traditional_to_simplified = bool(zh_values.get("traditionalToSimplified", False))
+    options.zh_min_token_length = int(zh_values.get("minTokenLength", 1))
+    options.lowercase_english = bool(en_values.get("lowercase", True))
+    options.repair_english_hyphenation = bool(en_values.get("repairHyphenation", True))
+    options.en_min_token_length = int(en_values.get("minTokenLength", 2))
+    return options
+
+
+def _stopwords(payload: Dict[str, Any]) -> Dict[str, set]:
+    values = _clean_values(payload)
+    result = {}
+    for language in LANGUAGES:
+        language_values = values.get(language) or {}
+        words = {str(word).strip() for word in language_values.get("stopwords", []) if str(word).strip()}
+        if bool(language_values.get("useDefaultStopwords", True)):
+            words |= get_default_stopwords(language)
+        if language == "en":
+            words = {word.casefold() for word in words}
+        result[language] = words
+    return result
+
+
+def _ensure_clean(payload: Dict[str, Any]) -> Dict[str, Any]:
+    state = get_state()
+    if state.cleaned_df is not None and state.tokens_list is not None:
+        return _clean_result()
+    _ensure_import(payload)
+    options = _clean_options(payload)
+    values = _clean_values(payload)
+    work_df = state.documents_df.copy()
+    removed_duplicates: List[str] = []
+    if options.remove_duplicates:
+        duplicate = work_df.duplicated(subset=["language", "text"], keep="first")
+        removed_duplicates = work_df.loc[duplicate, "doc_id"].astype(str).tolist()
+        work_df = work_df.loc[~duplicate].reset_index(drop=True)
+    texts = work_df["text"].astype(str).tolist()
+    languages = work_df["language"].astype(str).tolist()
+    stopwords = _stopwords(payload)
+    tokens_list, stats = tokenize_documents(
+        texts,
+        languages,
+        options,
+        stopwords,
+        (values.get("zh") or {}).get("customDictPath") or None,
+    )
+    if options.min_token_freq > 1:
+        frequencies = {
+            language: Counter(
+                word for row_language, tokens in zip(languages, tokens_list)
+                if row_language == language for word in tokens
+            )
+            for language in LANGUAGES
+        }
+        tokens_list = [
+            [word for word in tokens if frequencies[language][word] >= options.min_token_freq]
+            for language, tokens in zip(languages, tokens_list)
+        ]
+    cleaned = work_df.copy()
+    cleaned["cleaned_text"] = [clean_text(text, options, language) for text, language in zip(texts, languages)]
+    cleaned["tokens"] = [" ".join(tokens) for tokens in tokens_list]
+    cleaned["token_count"] = [len(tokens) for tokens in tokens_list]
+    removed_empty: List[str] = []
+    if options.remove_empty:
+        keep = [bool(tokens) for tokens in tokens_list]
+        removed_empty = cleaned.loc[[not value for value in keep], "doc_id"].astype(str).tolist()
+        cleaned = cleaned.loc[keep].reset_index(drop=True)
+        tokens_list = [tokens for tokens in tokens_list if tokens]
+
+    state.cleaned_df = cleaned
+    state.tokens_list = tokens_list
+    state.stopwords_by_language = stopwords
+    state.cleaned_languages = set(cleaned["language"].unique().tolist())
+    state.step_cleaned = True
+    state.session_payload["cleaningReport"] = {
+        "removedDuplicateDocIds": removed_duplicates,
+        "removedEmptyDocIds": removed_empty,
+    }
+    return _clean_result(stats)
+
+
+def _clean_result(stats: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    state = get_state()
+    language_stats = {}
+    for language in LANGUAGES:
+        if state.cleaned_df is None:
+            rows, tokens = 0, []
+        else:
+            indices = [i for i, value in enumerate(state.cleaned_df["language"].tolist()) if value == language]
+            rows = len(indices)
+            tokens = [state.tokens_list[i] for i in indices]
+        language_stats[language] = {
+            "documents": rows,
+            "totalTokens": sum(len(row) for row in tokens),
+            "uniqueWords": len({word for row in tokens for word in row}),
+            "stopwordCount": len(state.stopwords_by_language.get(language, set())),
+        }
+    return {
+        "documents": 0 if state.cleaned_df is None else len(state.cleaned_df),
+        "totalDocuments": 0 if state.documents_df is None else len(state.documents_df),
+        "languages": language_stats,
+        "report": state.session_payload.get("cleaningReport") or {},
+        "preview": _preview_dataframe("cleaned", state.cleaned_df, {"page": 1, "pageSize": 300}),
+    }
+
+
+def _selected_language(payload: Dict[str, Any]) -> str:
+    state = get_state()
+    requested = str(payload.get("language") or "").strip().lower()
+    available = [language for language, count in _language_counts(state.documents_df).items() if count]
+    if requested in LANGUAGES:
+        if requested not in available:
+            raise ValueError(f"当前文献表没有{LANGUAGE_LABELS[requested]}文献")
+        return requested
+    if len(available) == 1:
+        return available[0]
+    raise ValueError("混合语言项目必须明确选择 language: zh 或 en")
+
+
+def _filter_model_documents(state, language: str, genre: str, min_tokens: int):
+    df = state.cleaned_df.copy()
+    indices = [index for index, value in enumerate(df["language"].tolist()) if value == language]
+    df = df.iloc[indices].reset_index(drop=True)
+    tokens = [state.tokens_list[index] for index in indices]
+    if genre and genre not in {"全部文类", "全部", "__all__"}:
+        if "genre" not in df.columns:
+            raise ValueError("当前数据没有文类字段，无法按文类筛选")
+        mask = df["genre"].fillna("").astype(str).eq(str(genre))
+        selected = [index for index, keep in enumerate(mask.tolist()) if keep]
+        df = df.loc[mask].reset_index(drop=True)
+        tokens = [tokens[index] for index in selected]
+    valid = [index for index, row in enumerate(tokens) if len(row) >= min_tokens]
+    if not valid:
+        raise ValueError(f"当前{LANGUAGE_LABELS[language]}筛选条件下没有有效分词文献")
+    return df.iloc[valid].reset_index(drop=True), [tokens[index] for index in valid]
+
+
+def _model_values(payload: Dict[str, Any], model: str, language: str) -> Dict[str, Any]:
+    plural = payload.get(f"{model}Configs") or {}
+    return plural.get(language) or payload.get(f"{model}Config") or payload
+
+
+def _run_lda(payload: Dict[str, Any]) -> Dict[str, Any]:
+    state = get_state()
+    _ensure_clean(payload)
+    language = _selected_language(payload)
+    values = _model_values(payload, "lda", language)
+    model_df, model_tokens = _filter_model_documents(state, language, str(values.get("genre") or "__all__"), 3)
+    dictionary, corpus, filtered_tokens = build_corpus(
+        model_tokens,
+        min_doc_freq=int(values.get("minDocFreq", 2)),
+        max_doc_freq_ratio=float(values.get("maxDocFreqRatio", 0.95)),
+    )
+    model = train_lda(
+        corpus, dictionary,
+        num_topics=int(values.get("numTopics", 10)),
+        passes=int(values.get("passes", 20)),
+        iterations=int(values.get("iterations", 400)),
+        random_state=int(values.get("randomState", 42)),
+    )
+    topics = get_topics(model, n_words=20)
+    coherence = compute_coherence(model, corpus, dictionary, filtered_tokens)
+    doc_topics = get_doc_topics(model, corpus, model_df, list(range(len(filtered_tokens))))
+    state.lda_results[language] = {
+        "model": model, "dictionary": dictionary, "corpus": corpus, "topics": topics,
+        "doc_topics": doc_topics, "coherence": coherence,
+    }
+    state.lda_done_languages.add(language)
+    return {
+        "language": language, "topicCount": len(topics), "documents": len(doc_topics),
+        "topics": topics, "coherence": _number(coherence),
+        "documentTopics": _preview_dataframe("ldaDocTopics", doc_topics, {"page": 1, "pageSize": 200}),
+    }
+
+
+def _run_stm_check() -> Dict[str, Any]:
+    with contextlib.redirect_stdout(sys.stderr):
+        ok, message = check_r_environment()
+    get_state().r_available = ok
+    return {"available": ok, "message": message}
+
+
+def _run_stm(payload: Dict[str, Any]) -> Dict[str, Any]:
+    state = get_state()
+    _ensure_clean(payload)
+    language = _selected_language(payload)
+    values = _model_values(payload, "stm", language)
+    model_df, model_tokens = _filter_model_documents(state, language, str(values.get("genre") or "__all__"), 2)
+    r_model, topics, doc_topics, prevalence = train_stm(
+        model_df, model_tokens,
+        num_topics=int(values.get("numTopics", 10)),
+        prevalence_formula=str(values.get("prevalenceFormula") or "~ 1"),
+        content_covariate=str(values.get("contentCovariate") or "").strip() or None,
+        seed=int(values.get("randomState", 42)),
+        max_em_its=int(values.get("maxEmIterations", 75)),
+    )
+    state.stm_results[language] = {
+        "model": r_model, "topics": topics, "doc_topics": doc_topics, "prevalence": prevalence,
+    }
+    state.stm_done_languages.add(language)
+    state.r_available = True
+    return {
+        "language": language, "topicCount": len(topics), "documents": len(doc_topics), "topics": topics,
+        "documentTopics": _preview_dataframe("stmDocTopics", doc_topics, {"page": 1, "pageSize": 200}),
+        "prevalence": _json_records(prevalence),
+        "prevalenceColumns": [] if prevalence is None else [str(column) for column in prevalence.columns],
+    }
+
+
+def _open_lda_visualization(payload: Dict[str, Any]) -> Dict[str, Any]:
+    result = _run_lda(payload)
+    language = result["language"]
+    values = get_state().lda_results[language]
+    output_dir = str(payload.get("outputDir") or get_state().output_dir or os.path.expanduser("~"))
+    path = open_pyldavis(values["model"], values["corpus"], values["dictionary"], output_dir)
+    return {"path": path, "language": language, "message": "pyLDAvis 已生成并在浏览器中打开"}
 
 
 def _compare_summary(payload: Dict[str, Any]) -> Dict[str, Any]:
     state = get_state()
-    model = str(payload.get("model") or "lda").lower()
-    if model == "auto":
-        model = "lda"
-    if model == "stm":
-        if state.stm_doc_topics is None:
-            _run_stm(payload)
-        doc_topics = state.stm_doc_topics
-    else:
-        _run_lda(payload)
-        doc_topics = state.lda_doc_topics
-
+    model_name = str(payload.get("model") or "lda").lower()
+    result = _run_stm(payload) if model_name == "stm" else _run_lda(payload)
+    language = result["language"]
+    doc_topics = (
+        state.stm_results[language]["doc_topics"] if model_name == "stm"
+        else state.lda_results[language]["doc_topics"]
+    )
     filtered = doc_topics.copy()
-    filters = {
-        "newspaper": payload.get("newspaper"),
-        "pub_year": payload.get("year"),
-        "genre": payload.get("genre"),
-    }
-    for field, selected in filters.items():
-        if selected in (None, "", "全部", "__all__"):
+    for field, selected in (payload.get("filters") or {}).items():
+        if selected in (None, "", "__all__"):
             continue
         if field not in filtered.columns:
             raise ValueError(f"当前模型结果缺少筛选字段：{field}")
-        filtered = filtered[filtered[field].fillna("").astype(str) == str(selected)]
+        filtered = filtered[filtered[field].fillna("").astype(str).eq(str(selected))]
     if filtered.empty:
-        raise ValueError("当前筛选条件下没有可用于对比的文档")
-
-    axis_field = str(payload.get("axisField") or "newspaper")
-    metric_field = str(payload.get("metricField") or "__all__")
+        raise ValueError("当前筛选条件下没有可用于对比的文献")
+    axis = str(payload.get("axisField") or "source_name")
+    if axis == "language":
+        raise ValueError("中英文模型彼此独立，不能使用 language 作为主题对比轴")
+    if axis not in filtered.columns:
+        raise ValueError(f"当前模型结果缺少聚合维度：{axis}")
     topic_columns = [column for column in filtered.columns if column.startswith("topic_")]
-    if metric_field != "__all__":
-        if metric_field not in topic_columns:
-            raise ValueError(f"当前模型结果缺少主题指标：{metric_field}")
-        topic_columns = [metric_field]
-    summary = build_compare_summary(filtered, axis_field, topic_columns)
-    summary["model"] = model
-    chart_type = str(payload.get("chartType") or "bar")
-    if axis_field in {"pub_year", "time_index"}:
-        chart_type = "line"
-    summary["chartType"] = chart_type
-
-    topic_field = str(payload.get("topicField") or "__all__")
-    article_source = filtered
-    if topic_field != "__all__":
-        if topic_field not in [column for column in filtered.columns if column.startswith("topic_")]:
-            raise ValueError(f"当前模型结果缺少代表文章主题：{topic_field}")
-        identity = [column for column in filtered.columns if not column.startswith("topic_")]
-        article_source = filtered[identity + [topic_field]]
-    articles = representative_articles(article_source, int(payload.get("representativeLimit", 3)))
-    if state.merged_df is not None and "doc_id" in state.merged_df.columns:
-        article_lookup = {
-            str(row.get("doc_id", "")): row
-            for row in _json_records(state.merged_df)
-        }
-        for topic_articles in articles.values():
-            for article in topic_articles:
-                original = article_lookup.get(str(article.get("doc_id", "")), {})
-                for field in ("text", "author", "article_title", "newspaper", "pub_date", "genre"):
-                    if field not in article or article.get(field) in (None, ""):
-                        article[field] = original.get(field, "")
+    metric = str(payload.get("metricField") or "__all__")
+    if metric != "__all__":
+        if metric not in topic_columns:
+            raise ValueError(f"当前模型结果缺少主题指标：{metric}")
+        topic_columns = [metric]
+    summary = build_compare_summary(filtered, axis, topic_columns)
+    summary["model"] = model_name
+    summary["language"] = language
+    summary["chartType"] = "line" if axis in {"year", "time_index"} else str(payload.get("chartType") or "bar")
+    articles = representative_articles(filtered, int(payload.get("representativeLimit", 3)))
+    lookup = {str(row.get("doc_id", "")): row for row in _json_records(state.documents_df)}
+    for topic_articles in articles.values():
+        for article in topic_articles:
+            original = lookup.get(str(article.get("doc_id", "")), {})
+            for field in ("text", "creator", "title", "source_name", "date", "genre", "language"):
+                if article.get(field) in (None, ""):
+                    article[field] = original.get(field, "")
     summary["representativeArticles"] = articles
-    summary["filters"] = {
-        "newspaper": payload.get("newspaper") or "__all__",
-        "year": payload.get("year") or "__all__",
-        "genre": payload.get("genre") or "__all__",
-        "topicField": topic_field,
-        "metricField": metric_field,
-    }
+    summary["filters"] = payload.get("filters") or {}
     return summary
+
+
+def _run_compare(payload: Dict[str, Any]) -> Dict[str, Any]:
+    summary = _compare_summary(payload)
+    return {
+        "language": summary["language"], "rows": len(summary.get("rows") or []),
+        "groups": summary.get("groups") or [], "representativeArticles": summary.get("representativeArticles") or {},
+        **summary,
+    }
 
 
 def _export_items(payload: Dict[str, Any]) -> Dict[str, Any]:
     _ensure_import(payload)
-    if "options" in payload:
+    return {"items": [
+        {"key": "documents", "filename": "documents.csv", "label": "标准化文献表", "available": True},
+        {"key": "cleaned_documents", "filename": "cleaned_documents.csv", "label": "清洗后文献", "available": True},
+        {"key": "tokens_corpus", "filename": "{language}/tokens_corpus.txt", "label": "分语言语料", "available": True},
+        {"key": "lda_topic_word", "filename": "{language}/lda_topic_word.csv", "label": "LDA 主题词", "available": True},
+        {"key": "lda_doc_topic", "filename": "{language}/lda_doc_topic.csv", "label": "LDA 文献主题", "available": True},
+        {"key": "lda_coherence", "filename": "{language}/lda_coherence.json", "label": "LDA 一致性", "available": True},
+        {"key": "stm_topic_word", "filename": "{language}/stm_topic_word.csv", "label": "STM 主题词", "available": True},
+        {"key": "stm_doc_topic", "filename": "{language}/stm_doc_topic.csv", "label": "STM 文献主题", "available": True},
+        {"key": "stm_prevalence", "filename": "{language}/stm_topic_prevalence.csv", "label": "STM prevalence", "available": True},
+        {"key": "session_config", "filename": "session_config.json", "label": "v2 会话配置", "available": True},
+    ]}
+
+
+def _run_export(payload: Dict[str, Any]) -> Dict[str, Any]:
+    state = get_state()
+    _ensure_clean(payload)
+    output_dir = str(payload.get("outputDir") or "").strip()
+    if not output_dir:
+        raise ValueError("请选择导出目录")
+    os.makedirs(output_dir, exist_ok=True)
+    state.output_dir = output_dir
+    state.project_name = str(payload.get("projectName") or state.project_name)
+    default_items = {
+        "documents", "cleaned_documents", "tokens_corpus", "lda_topic_word", "lda_doc_topic",
+        "lda_coherence", "stm_topic_word", "stm_doc_topic", "stm_prevalence", "session_config",
+    }
+    selected = set(payload.get("exportItems") or default_items)
+    available_languages = [language for language, count in _language_counts(state.documents_df).items() if count]
+    languages = [language for language in payload.get("exportLanguages", available_languages) if language in available_languages]
+    exported, errors = [], []
+
+    def write_common(key, filename, action):
+        if key not in selected:
+            return
+        try:
+            action()
+            exported.append(filename)
+        except Exception as exc:
+            errors.append({"key": key, "language": None, "error": str(exc)})
+
+    write_common("documents", "documents.csv", lambda: state.documents_df.to_csv(
+        os.path.join(output_dir, "documents.csv"), index=False, encoding="utf-8-sig"
+    ))
+    write_common("cleaned_documents", "cleaned_documents.csv", lambda: state.cleaned_df.to_csv(
+        os.path.join(output_dir, "cleaned_documents.csv"), index=False, encoding="utf-8-sig"
+    ))
+
+    lda_keys = {"lda_topic_word", "lda_doc_topic", "lda_coherence"}
+    stm_keys = {"stm_topic_word", "stm_doc_topic", "stm_prevalence"}
+    for language in languages:
+        language_dir = os.path.join(output_dir, language)
+        os.makedirs(language_dir, exist_ok=True)
+        indices = [i for i, value in enumerate(state.cleaned_df["language"].tolist()) if value == language]
+        language_tokens = [state.tokens_list[index] for index in indices]
+        if "tokens_corpus" in selected:
+            try:
+                with open(os.path.join(language_dir, "tokens_corpus.txt"), "w", encoding="utf-8") as file:
+                    for tokens in language_tokens:
+                        file.write(" ".join(tokens) + "\n")
+                exported.append(f"{language}/tokens_corpus.txt")
+            except Exception as exc:
+                errors.append({"key": "tokens_corpus", "language": language, "error": str(exc)})
+
+        if selected & lda_keys:
+            try:
+                _run_lda({**payload, "language": language})
+                values = state.lda_results[language]
+                if "lda_topic_word" in selected:
+                    rows = [
+                        {"topic_id": topic["topic_id"], "rank": rank, "word": word, "probability": probability}
+                        for topic in values["topics"] for rank, (word, probability) in enumerate(topic["words"], 1)
+                    ]
+                    pd.DataFrame(rows).to_csv(os.path.join(language_dir, "lda_topic_word.csv"), index=False, encoding="utf-8-sig")
+                    exported.append(f"{language}/lda_topic_word.csv")
+                if "lda_doc_topic" in selected:
+                    values["doc_topics"].to_csv(os.path.join(language_dir, "lda_doc_topic.csv"), index=False, encoding="utf-8-sig")
+                    exported.append(f"{language}/lda_doc_topic.csv")
+                if "lda_coherence" in selected:
+                    with open(os.path.join(language_dir, "lda_coherence.json"), "w", encoding="utf-8") as file:
+                        json.dump({"language": language, "coherence_c_v": values["coherence"]}, file, ensure_ascii=False, indent=2)
+                    exported.append(f"{language}/lda_coherence.json")
+            except Exception as exc:
+                for key in sorted(selected & lda_keys):
+                    errors.append({"key": key, "language": language, "error": str(exc)})
+
+        if selected & stm_keys:
+            try:
+                _run_stm({**payload, "language": language})
+                values = state.stm_results[language]
+                if "stm_topic_word" in selected:
+                    rows = [
+                        {"topic_id": topic["topic_id"], "rank": rank, "word": word}
+                        for topic in values["topics"] for rank, (word, _) in enumerate(topic["words"], 1)
+                    ]
+                    pd.DataFrame(rows).to_csv(os.path.join(language_dir, "stm_topic_word.csv"), index=False, encoding="utf-8-sig")
+                    exported.append(f"{language}/stm_topic_word.csv")
+                if "stm_doc_topic" in selected:
+                    values["doc_topics"].to_csv(os.path.join(language_dir, "stm_doc_topic.csv"), index=False, encoding="utf-8-sig")
+                    exported.append(f"{language}/stm_doc_topic.csv")
+                if "stm_prevalence" in selected and values["prevalence"] is not None:
+                    values["prevalence"].to_csv(os.path.join(language_dir, "stm_topic_prevalence.csv"), index=False, encoding="utf-8-sig")
+                    exported.append(f"{language}/stm_topic_prevalence.csv")
+            except Exception as exc:
+                for key in sorted(selected & stm_keys):
+                    errors.append({"key": key, "language": language, "error": str(exc)})
+
+    def write_session():
+        config = dict(state.session_payload)
+        config.update({
+            "schemaVersion": 2,
+            "projectName": state.project_name,
+            "outputDir": output_dir,
+            "exportedAt": datetime.now().isoformat(),
+            "documentCount": len(state.documents_df),
+            "languageRows": _language_counts(state.documents_df),
+            "fieldMapping": state.document_col_map,
+        })
+        with open(os.path.join(output_dir, "session_config.json"), "w", encoding="utf-8") as file:
+            json.dump(config, file, ensure_ascii=False, indent=2)
+
+    write_common("session_config", "session_config.json", write_session)
+    return {"outputDir": output_dir, "exported": exported, "errors": errors, "count": len(exported)}
+
+
+def _table_preview(payload: Dict[str, Any]) -> Dict[str, Any]:
+    table = str(payload.get("table") or payload.get("source") or "documents")
+    state = get_state()
+    if table == "documents":
+        _ensure_import(payload)
+        frame = state.documents_df
+    elif table == "cleaned":
         _ensure_clean(payload)
-    if "numTopics" in payload:
-        _run_lda(payload)
-    return {"items": list_export_items(get_state())}
+        frame = state.cleaned_df
+    elif table in {"ldaDocTopics", "stmDocTopics"}:
+        result = _run_lda(payload) if table.startswith("lda") else _run_stm(payload)
+        language = result["language"]
+        frame = state.lda_results[language]["doc_topics"] if table.startswith("lda") else state.stm_results[language]["doc_topics"]
+    else:
+        raise ValueError(f"不支持的表格预览来源：{table}")
+    return _preview_dataframe(table, frame, payload)
+
+
+def _stm_covariates(payload: Dict[str, Any]) -> Dict[str, Any]:
+    _ensure_import(payload)
+    return {"covariates": _covariate_items(get_state().documents_df)}
 
 
 def handle(command: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-    # Tauri 每次任务都会创建新的 Python 进程。新的导入才应清空旧工作流；
-    # 其他任务依赖其传入的 session payload 重建真实文件对应的状态。
-    if command in {"task.import", "import.merge", "import.load_table"}:
+    if command in {"task.import", "import.load_documents"}:
         reset_state()
     _remember_session_payload(payload)
-    if command in {"session.get_state", "task.import"}:
-        data = _ensure_import(payload) if command == "task.import" else {}
-    elif command in {"import.merge", "import.load_table"}:
+    if command == "session.get_state":
+        data = {}
+    elif command in {"task.import", "import.load_documents"}:
         data = _ensure_import(payload)
     elif command in {"task.clean", "clean.run"}:
         data = _ensure_clean(payload)
@@ -703,9 +642,9 @@ def handle(command: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     elif command == "table.preview":
         data = _table_preview(payload)
     elif command == "clean.preview":
-        data = _clean_preview(payload)
+        data = _ensure_clean(payload)
     elif command == "lda.get_result":
-        data = _lda_result(payload)
+        data = _run_lda(payload)
     elif command == "stm.analyze_covariates":
         data = _stm_covariates(payload)
     elif command in {"task.compare", "compare.build_summary"}:
@@ -716,7 +655,6 @@ def handle(command: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         data = _run_export(payload)
     else:
         raise ValueError(f"未知命令：{command}")
-
     snapshot = _state_snapshot()
     if command in {"task.export", "export.run"}:
         snapshot["summary"]["exportFiles"] = data.get("count", 0)
@@ -728,22 +666,19 @@ def main() -> int:
     parser.add_argument("command")
     parser.add_argument("payload", nargs="?", default="{}")
     args = parser.parse_args()
-
     try:
-        payload = json.loads(args.payload)
-        result = handle(args.command, payload)
+        result = handle(args.command, json.loads(args.payload))
     except Exception as exc:
-        result = {
-            "ok": False,
-            "error": {
-                "code": exc.__class__.__name__.upper(),
-                "message": str(exc),
-                "recoverable": True,
-                "suggestion": "请检查输入文件、Python 依赖和外部运行环境。",
-            },
-            "state": _state_snapshot(),
+        error = {
+            "code": exc.__class__.__name__.upper(),
+            "message": str(exc),
+            "recoverable": True,
+            "suggestion": "请检查文献表必填字段、语言值、清洗参数和外部运行环境。",
         }
-
+        if isinstance(exc, DocumentValidationError):
+            error["code"] = "INVALID_DOCUMENT_TABLE"
+            error["issues"] = exc.issues
+        result = {"ok": False, "error": error, "state": _state_snapshot()}
     sys.stdout.write(json.dumps(result, ensure_ascii=False))
     return 0 if result.get("ok") else 1
 

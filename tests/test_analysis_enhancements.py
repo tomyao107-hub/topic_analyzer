@@ -1,82 +1,60 @@
 import pandas as pd
 
 
-def test_build_cleaned_records_keeps_metadata_text_and_tokens():
-    from gui.pages.clean_page import build_cleaned_records
-    from services.clean_service import CleanOptions
+def test_english_cleaning_repairs_linebreak_hyphen_and_preserves_inflection():
+    from services.clean_service import CleanOptions, clean_text, tokenize_documents
 
-    merged = pd.DataFrame([
-        {"doc_id": "1", "genre": "新闻", "text": "一二三，测试文本。"},
-        {"doc_id": "2", "genre": "评论", "text": "第二篇文本。"},
+    options = CleanOptions()
+    options.min_text_length = 1
+    text = "The inter-\nnational markets and workers' histories."
+    tokens, _ = tokenize_documents([text], ["en"], options, {"en": {"the", "and"}})
+
+    assert clean_text(text, options, "en").startswith("the international")
+    assert "international" in tokens[0]
+    assert "markets" in tokens[0]
+    assert "market" not in tokens[0]
+
+
+def test_chinese_minimum_token_length_one_keeps_historical_single_characters():
+    from services.clean_service import CleanOptions, tokenize_documents
+
+    options = CleanOptions()
+    options.min_text_length = 1
+    options.zh_min_token_length = 1
+    tokens, _ = tokenize_documents(["国 与 民"], ["zh"], options, {"zh": {"与"}})
+    assert tokens == [["国", "民"]]
+
+
+def test_parse_document_date_builds_continuous_time_index_and_keeps_custom_fields():
+    from utils.field_mapper import parse_document_date
+
+    frame = pd.DataFrame([
+        {"doc_id": "1", "date": "1920-03-01", "研究分组": "甲"},
+        {"doc_id": "2", "date": "1920-04-01", "研究分组": "乙"},
+        {"doc_id": "3", "date": "1921-03-01", "研究分组": "丙"},
     ])
-    tokens = [["测试", "文本"], ["第二", "文本"]]
-    opts = CleanOptions()
-    opts.remove_numbers = True
-    opts.remove_punct = True
-
-    result = build_cleaned_records(merged, tokens, opts)
-
-    assert list(result["doc_id"]) == ["1", "2"]
-    assert list(result["genre"]) == ["新闻", "评论"]
-    assert "cleaned_text" in result.columns
-    assert list(result["tokens"]) == ["测试 文本", "第二 文本"]
-    assert list(result["token_count"]) == [2, 2]
+    result = parse_document_date(frame)
+    assert result["year"].tolist() == [1920, 1920, 1921]
+    assert result["time_index"].astype(int).tolist() == [1, 2, 13]
+    assert result["研究分组"].tolist() == ["甲", "乙", "丙"]
 
 
-def test_filter_docs_by_genre_returns_matching_rows_and_tokens():
-    from gui.pages.lda_page import filter_docs_by_genre
+def test_compare_summary_supports_generic_historical_metadata():
+    from services.compare_service import build_compare_summary
 
-    df = pd.DataFrame([
-        {"doc_id": "1", "genre": "新闻"},
-        {"doc_id": "2", "genre": "评论"},
-        {"doc_id": "3", "genre": "新闻"},
+    frame = pd.DataFrame([
+        {"source_type": "书信", "topic_0": 0.2},
+        {"source_type": "书信", "topic_0": 0.4},
+        {"source_type": "日记", "topic_0": 0.9},
     ])
-    tokens = [["a"], ["b"], ["c"]]
-
-    filtered_df, filtered_tokens = filter_docs_by_genre(df, tokens, "新闻")
-
-    assert list(filtered_df["doc_id"]) == ["1", "3"]
-    assert filtered_tokens == [["a"], ["c"]]
+    summary = build_compare_summary(frame, "source_type", ["topic_0"])
+    rows = {row["source_type"]: row["topic_0"] for row in summary["rows"]}
+    assert round(rows["书信"], 4) == 0.3
+    assert round(rows["日记"], 4) == 0.9
 
 
-def test_build_topic_summary_groups_axis_and_topics():
-    from gui.pages.compare_page import build_topic_summary
+def test_stm_formula_parser_supports_unicode_and_backticked_custom_columns():
+    from services.stm_service import _extract_formula_variables
 
-    df = pd.DataFrame([
-        {"genre": "新闻", "topic_0": 0.2, "topic_1": 0.8},
-        {"genre": "新闻", "topic_0": 0.4, "topic_1": 0.6},
-        {"genre": "评论", "topic_0": 0.9, "topic_1": 0.1},
-    ])
-
-    summary = build_topic_summary(df, "genre", ["topic_0", "topic_1"])
-
-    assert list(summary["genre"]) == ["评论", "新闻"]
-    assert round(float(summary.loc[summary["genre"] == "新闻", "topic_0"].iloc[0]), 4) == 0.3
-    assert round(float(summary.loc[summary["genre"] == "评论", "topic_1"].iloc[0]), 4) == 0.1
-
-
-def test_parse_date_column_builds_continuous_time_index():
-    from utils.field_mapper import parse_date_column
-
-    df = pd.DataFrame([
-        {"doc_id": "1", "pub_year": "1920", "pub_month": "3"},
-        {"doc_id": "2", "pub_year": "1920", "pub_month": "4"},
-        {"doc_id": "3", "pub_year": "1921", "pub_month": "3"},
-        {"doc_id": "4", "pub_year": "", "pub_month": ""},
-    ])
-
-    result = parse_date_column(df)
-
-    assert list(result["time_index"].dropna().astype(int)) == [1, 2, 13]
-
-
-def test_parse_date_column_keeps_existing_time_index():
-    from utils.field_mapper import parse_date_column
-
-    df = pd.DataFrame([
-        {"doc_id": "1", "pub_year": "1920", "pub_month": "3", "time_index": "99"},
-    ])
-
-    result = parse_date_column(df)
-
-    assert list(result["time_index"]) == ["99"]
+    assert _extract_formula_variables("~ 研究分组 + year") == ["研究分组", "year"]
+    assert _extract_formula_variables("~ `archive collection` + s(year)") == ["archive collection", "year"]
