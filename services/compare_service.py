@@ -52,7 +52,7 @@ def representative_articles(df: pd.DataFrame, limit_per_topic: int = 3) -> Dict[
     """按主题概率返回每个主题最具代表性的文章。"""
     if df is None or df.empty:
         return {}
-    identity_cols = [column for column in ("doc_id", "article_title", "newspaper", "pub_date", "genre", "text") if column in df.columns]
+    identity_cols = [column for column in ("doc_id", "article_title", "newspaper", "pub_date", "author", "genre", "text") if column in df.columns]
     result: Dict[str, List[Dict[str, Any]]] = {}
     for topic_col in (column for column in df.columns if column.startswith("topic_")):
         columns = identity_cols + [topic_col]

@@ -238,7 +238,8 @@ def train_stm(
 
     # 主题关键词
     logger.info("提取 STM 主题关键词...")
-    ro.r("stm_labels <- labelTopics(stm_model, n=20)")
+    label_word_count = min(20, len(vocab_list))
+    ro.r(f"stm_labels <- labelTopics(stm_model, n={label_word_count})")
     topics = _extract_stm_topics(ro.globalenv["stm_labels"], num_topics)
 
     # 文档主题分布

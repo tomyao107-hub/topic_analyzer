@@ -20,7 +20,8 @@ import {
   Table2,
   TextSelect
 } from "lucide-react";
-import type { ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { routes, routeLabels } from "./routes";
 import {
   useWorkflowStore,
@@ -73,14 +74,14 @@ const pageCopy: Record<RouteKey, PageCopy> = {
     title: "STM 结构主题模型",
     eyebrow: "R stm 集成",
     primary: "检查 R 环境，配置 prevalence 公式、content 协变量和训练参数。",
-    secondary: "协变量可用性与训练结果后续由 stm_service 和 Python bridge 提供。",
+    secondary: "协变量可用性、R 环境检查、主题结果和 prevalence 已连接 stm_service 与 Python bridge。",
     task: "stm"
   },
   compare: {
     title: "对比分析",
     eyebrow: "主题差异浏览",
     primary: "按报刊、年份、文类和主题维度生成聚合视图与代表文章列表。",
-    secondary: "聚合语义后续下沉到 Python 层，前端负责图表、表格和文章浏览。",
+    secondary: "Python 负责筛选与聚合，前端展示图表、聚合表和可浏览的主题代表文章。",
     task: "compare"
   },
   export: {
@@ -103,7 +104,6 @@ export function App() {
   const setActiveRoute = useWorkflowStore((state) => state.setActiveRoute);
   const setImportConfig = useWorkflowStore((state) => state.setImportConfig);
   const runBackendTask = useWorkflowStore((state) => state.runBackendTask);
-  const failBackendTask = useWorkflowStore((state) => state.failBackendTask);
   const page = pageCopy[activeRoute];
   const task = page.task ? tasks[page.task] : null;
 
@@ -174,7 +174,6 @@ export function App() {
             importConfig={importConfig}
             onImportConfigChange={setImportConfig}
             onRun={runBackendTask}
-            onFail={failBackendTask}
           />
         )}
       </main>
@@ -214,6 +213,9 @@ function WelcomePage({ summary, tasks, onNavigate }: { summary: ReturnType<typeo
 type WorkflowRouteKey = Exclude<RouteKey, "welcome">;
 
 type WorkflowSummary = ReturnType<typeof useWorkflowStore.getState>["summary"];
+type TaskResult = Record<string, unknown> | null;
+type PreviewResult = { columns?: string[]; rows?: Array<Record<string, unknown>>; total?: number };
+type TopicResult = { topic_id: number; label?: string; words: Array<[string, number]> };
 
 type PageDefinition = {
   task: TaskKey;
@@ -221,15 +223,22 @@ type PageDefinition = {
   cards: Array<{ title: string; icon: ReactNode; body: (summary: WorkflowSummary) => string }>;
 };
 
-function WorkflowPage({ route, task, summary, workflow, importConfig, onImportConfigChange, onRun, onFail }: { route: WorkflowRouteKey; task: TaskState; summary: WorkflowSummary; workflow: ReturnType<typeof useWorkflowStore.getState>["workflow"]; importConfig: ImportConfig; onImportConfigChange: (values: Partial<ImportConfig>) => void; onRun: (task: TaskKey) => void; onFail: (task: TaskKey) => void }) {
+function WorkflowPage({ route, task, summary, workflow, importConfig, onImportConfigChange, onRun }: { route: WorkflowRouteKey; task: TaskState; summary: WorkflowSummary; workflow: ReturnType<typeof useWorkflowStore.getState>["workflow"]; importConfig: ImportConfig; onImportConfigChange: (values: Partial<ImportConfig>) => void; onRun: (task: TaskKey) => void }) {
   const config = pageDefinitions[route];
-  const disabled = !canRun(route, workflow) || task.status === "running";
   const configs = useWorkflowStore((state) => state.configs);
   const setTaskConfig = useWorkflowStore((state) => state.setTaskConfig);
   const chooseConfigPath = useWorkflowStore((state) => state.chooseConfigPath);
+  const results = useWorkflowStore((state) => state.results);
+  const stmEnvironment = useWorkflowStore((state) => state.stmEnvironment);
+  const checkStmEnvironment = useWorkflowStore((state) => state.checkStmEnvironment);
+  const logs = useWorkflowStore((state) => state.logs);
+  const clearLogs = useWorkflowStore((state) => state.clearLogs);
+  const parameterBlocked = route === "stm" && stmEnvironment.available !== true;
+  const exportBlocked = route === "export" && (!configs.export.outputDir.trim() || configs.export.items.length === 0);
+  const disabled = !canRun(route, workflow) || parameterBlocked || exportBlocked || task.status === "running";
 
   if (route === "import") {
-    return <ImportWorkflowPage task={task} summary={summary} importConfig={importConfig} onImportConfigChange={onImportConfigChange} onRun={onRun} onFail={onFail} />;
+    return <ImportWorkflowPage task={task} summary={summary} result={results.import} importConfig={importConfig} onImportConfigChange={onImportConfigChange} onRun={onRun} />;
   }
 
   return (
@@ -237,17 +246,21 @@ function WorkflowPage({ route, task, summary, workflow, importConfig, onImportCo
       <section className="action-layout">
         <article className="control-panel">
           <div className="panel-title"><Settings2 size={18} />主操作</div>
-          <ParameterEditor route={route as ConfigTaskKey} configs={configs} onChange={setTaskConfig} onChoosePath={chooseConfigPath} />
+          <ParameterEditor route={route as ConfigTaskKey} configs={configs} results={results} stmEnvironment={stmEnvironment} onChange={setTaskConfig} onChoosePath={chooseConfigPath} />
           <div className="button-row">
+            {route === "stm" && (
+              <button className="ghost-button" type="button" disabled={stmEnvironment.checking} onClick={checkStmEnvironment}>
+                <Activity size={17} />{stmEnvironment.checking ? "正在检查..." : "检查 R 环境"}
+              </button>
+            )}
             <button className="primary-button" type="button" disabled={disabled} onClick={() => onRun(config.task)}>
               {task.status === "running" ? <RefreshCw size={17} /> : <Play size={17} />}
               {config.primaryAction}
             </button>
-            <button className="ghost-button" type="button" onClick={() => onFail(config.task)}>
-              <AlertTriangle size={17} />错误态预览
-            </button>
           </div>
           {!canRun(route, workflow) && <p className="hint-text">需要先完成前置步骤后才能启动该任务。</p>}
+          {route === "stm" && stmEnvironment.available !== true && <p className="hint-text">请先完成 R 环境检查，环境可用后才能训练 STM。</p>}
+          {route === "export" && !configs.export.outputDir.trim() && <p className="hint-text">请选择输出目录。</p>}
         </article>
 
         <TaskStatusPanel task={task} />
@@ -261,14 +274,20 @@ function WorkflowPage({ route, task, summary, workflow, importConfig, onImportCo
           </article>
         ))}
       </section>
+
+      <WorkflowResultPanel route={route} result={results[route]} summary={summary} logs={logs} onClearLogs={clearLogs} />
     </div>
   );
 }
 
-function ImportWorkflowPage({ task, summary, importConfig, onImportConfigChange, onRun, onFail }: { task: TaskState; summary: WorkflowSummary; importConfig: ImportConfig; onImportConfigChange: (values: Partial<ImportConfig>) => void; onRun: (task: TaskKey) => void; onFail: (task: TaskKey) => void }) {
-  const disabled = task.status === "running";
-  const sampleMode = !importConfig.metadataPath.trim() || !importConfig.textPath.trim();
+function ImportWorkflowPage({ task, summary, result, importConfig, onImportConfigChange, onRun }: { task: TaskState; summary: WorkflowSummary; result: TaskResult; importConfig: ImportConfig; onImportConfigChange: (values: Partial<ImportConfig>) => void; onRun: (task: TaskKey) => void }) {
+  const missingFiles = !importConfig.metadataPath.trim() || !importConfig.textPath.trim();
+  const disabled = task.status === "running" || missingFiles;
   const chooseImportFile = useWorkflowStore((state) => state.chooseImportFile);
+  const metadataColumns = toStringArray(result?.metadataColumns);
+  const textColumns = toStringArray(result?.textColumns);
+  const metadataOptions = fieldOptions(metadataColumns, importConfig.metadataIdField);
+  const textOptions = fieldOptions(textColumns, importConfig.textIdField);
 
   return (
     <div className="page-stack">
@@ -299,30 +318,21 @@ function ImportWorkflowPage({ task, summary, importConfig, onImportConfigChange,
             <label>
               <span>元数据关联字段</span>
               <select value={importConfig.metadataIdField} onChange={(event) => onImportConfigChange({ metadataIdField: event.target.value })}>
-                <option value="doc_id">doc_id</option>
-                <option value="article_id">article_id</option>
-                <option value="id">id</option>
-                <option value="编号">编号</option>
+                {metadataOptions.map((column) => <option key={column} value={column}>{column}</option>)}
               </select>
             </label>
             <label>
               <span>正文关联字段</span>
               <select value={importConfig.textIdField} onChange={(event) => onImportConfigChange({ textIdField: event.target.value })}>
-                <option value="doc_id">doc_id</option>
-                <option value="article_id">article_id</option>
-                <option value="id">id</option>
-                <option value="编号">编号</option>
+                {textOptions.map((column) => <option key={column} value={column}>{column}</option>)}
               </select>
             </label>
           </div>
-          {sampleMode && <p className="hint-text">未填写完整文件路径时，将使用内置样例数据完成导入验证。</p>}
+          {missingFiles && <p className="hint-text">请分别选择元数据表和正文表；正式导入不会自动混用示例数据。</p>}
           <div className="button-row">
             <button className="primary-button" type="button" disabled={disabled} onClick={() => onRun("import")}>
               {task.status === "running" ? <RefreshCw size={17} /> : <Play size={17} />}
               识别字段并合并
-            </button>
-            <button className="ghost-button" type="button" onClick={() => onFail("import")}>
-              <AlertTriangle size={17} />错误态预览
             </button>
           </div>
         </article>
@@ -331,8 +341,8 @@ function ImportWorkflowPage({ task, summary, importConfig, onImportConfigChange,
       </section>
 
       <section className="import-result-grid" aria-label="导入结果">
-        <ImportMappingPanel summary={summary} />
-        <ImportPreviewPanel summary={summary} />
+        <ImportMappingPanel result={result} />
+        <ImportPreviewPanel summary={summary} result={result} />
       </section>
     </div>
   );
@@ -351,14 +361,12 @@ function TableSourceCard({ title, icon, value, placeholder, fields, onChange, on
   );
 }
 
-function ImportMappingPanel({ summary }: { summary: WorkflowSummary }) {
+function ImportMappingPanel({ result }: { result: TaskResult }) {
+  const metadataMapping = toRecord(result?.metadataMapping);
+  const textMapping = toRecord(result?.textMapping);
   const mappings = [
-    ["doc_id", "文档编号", "必填"],
-    ["article_title", "文章标题", "推荐"],
-    ["newspaper", "报刊名", "推荐"],
-    ["pub_date / pub_year", "出版日期 / 年份", "推荐"],
-    ["genre", "文类", "可选"],
-    ["text", "正文文本", "必填"]
+    ...Object.entries(metadataMapping).map(([standard, original]) => ["元数据表", standard, String(original)]),
+    ...Object.entries(textMapping).map(([standard, original]) => ["正文表", standard, String(original)])
   ];
 
   return (
@@ -366,17 +374,18 @@ function ImportMappingPanel({ summary }: { summary: WorkflowSummary }) {
       <div className="module-heading"><Table2 size={18} /><span>字段识别结果</span></div>
       <table className="data-table">
         <thead>
-          <tr><th>标准字段</th><th>含义</th><th>状态</th></tr>
+          <tr><th>数据表</th><th>标准字段</th><th>原始字段</th></tr>
         </thead>
         <tbody>
-          {mappings.map(([field, label, status]) => <tr key={field}><td>{field}</td><td>{label}</td><td>{summary.mergedRows ? "已识别" : status}</td></tr>)}
+          {mappings.length ? mappings.map(([source, field, original]) => <tr key={`${source}-${field}`}><td>{source}</td><td>{field}</td><td>{original}</td></tr>) : <tr><td colSpan={3}>完成导入后显示实际字段识别结果</td></tr>}
         </tbody>
       </table>
     </article>
   );
 }
 
-function ImportPreviewPanel({ summary }: { summary: WorkflowSummary }) {
+function ImportPreviewPanel({ summary, result }: { summary: WorkflowSummary; result: TaskResult }) {
+  const preview = toPreview(result?.preview);
   return (
     <article className="module-card import-table-card">
       <div className="module-heading"><Database size={18} /><span>合并与预览</span></div>
@@ -385,26 +394,24 @@ function ImportPreviewPanel({ summary }: { summary: WorkflowSummary }) {
         <Metric label="正文行" value={summary.textRows || "待导入"} />
         <Metric label="合并文章" value={summary.mergedRows || "待合并"} />
       </div>
-      <table className="data-table preview-table">
-        <thead>
-          <tr><th>doc_id</th><th>标题</th><th>报刊</th><th>正文</th></tr>
-        </thead>
-        <tbody>
-          <tr><td>001</td><td>市场与工厂</td><td>申报</td><td>市场、贸易、工厂相关正文...</td></tr>
-          <tr><td>002</td><td>学校新制</td><td>大公报</td><td>学校、教育、课程相关正文...</td></tr>
-          <tr><td>003</td><td>城市交通</td><td>申报</td><td>城市、道路、交通相关正文...</td></tr>
-        </tbody>
-      </table>
+      <ResultTable columns={preview.columns ?? []} rows={preview.rows ?? []} emptyText="完成合并后显示前 10 行真实数据" />
       <p className="import-match-note">元数据未匹配 {summary.unmatchedMetaRows} 条，正文未匹配 {summary.unmatchedTextRows} 条。</p>
     </article>
   );
 }
 
+function fieldOptions(columns: string[], current: string) {
+  const aliases = ["doc_id", "文档编号", "docid", "id", "编号", "文章编号", "document_id"];
+  return [...new Set([current, ...columns, ...aliases].filter(Boolean))];
+}
+
 type ParameterEditorProps = {
   route: ConfigTaskKey;
   configs: WorkflowConfigs;
+  results: Record<TaskKey, TaskResult>;
+  stmEnvironment: ReturnType<typeof useWorkflowStore.getState>["stmEnvironment"];
   onChange: <K extends ConfigTaskKey>(task: K, values: Partial<WorkflowConfigs[K]>) => void;
-  onChoosePath: (target: "customDict" | "outputDir") => Promise<void>;
+  onChoosePath: (target: "customDict" | "stopwords" | "outputDir") => Promise<void>;
 };
 
 const exportOptions = [
@@ -420,9 +427,12 @@ const exportOptions = [
   ["session_config", "会话配置"]
 ] as const;
 
-function ParameterEditor({ route, configs, onChange, onChoosePath }: ParameterEditorProps) {
+function ParameterEditor({ route, configs, results, stmEnvironment, onChange, onChoosePath }: ParameterEditorProps) {
+  const importResult = results.import;
+  const genres = toStringArray(importResult?.genres);
   if (route === "clean") {
     const values = configs.clean;
+    const stopwordCount = values.stopwordsText.split(/\r?\n/).filter((word) => word.trim()).length;
     return (
       <div className="parameter-form">
         <div className="toggle-grid">
@@ -435,10 +445,22 @@ function ParameterEditor({ route, configs, onChange, onChoosePath }: ParameterEd
         </div>
         <div className="parameter-grid">
           <NumberField label="最短文本长度" value={values.minTextLength} min={1} max={500} onChange={(minTextLength) => onChange("clean", { minTextLength })} />
-          <NumberField label="最小词频" value={values.minTokenFreq} min={1} max={100} onChange={(minTokenFreq) => onChange("clean", { minTokenFreq })} />
           <NumberField label="最小文档频率" value={values.minDocFreq} min={1} max={100} onChange={(minDocFreq) => onChange("clean", { minDocFreq })} />
           <NumberField label="最大文档频率比例" value={values.maxDocFreqRatio} min={0.01} max={1} step={0.05} onChange={(maxDocFreqRatio) => onChange("clean", { maxDocFreqRatio })} />
         </div>
+        <fieldset className="export-options">
+          <legend>停用词与词典</legend>
+          <ToggleField label="使用内置中文停用词" checked={values.useDefaultStopwords} onChange={(useDefaultStopwords) => onChange("clean", { useDefaultStopwords })} />
+          <div className="parameter-field stopword-editor">
+            <span>可编辑停用词（每行一词，当前 {stopwordCount} 个）</span>
+            <textarea value={values.stopwordsText} placeholder="可直接添加、删除停用词；每行一个。" onChange={(event) => onChange("clean", { stopwordsText: event.target.value })} />
+          </div>
+          <div className="button-row compact-buttons">
+            <button className="browse-button" type="button" onClick={() => onChoosePath("stopwords")}><FileInput size={16} />加载停用词表</button>
+            <button className="ghost-button" type="button" onClick={() => onChange("clean", { stopwordsText: "", stopwordsPath: "" })}>清空编辑</button>
+          </div>
+          {values.stopwordsPath && <p className="field-note">外部文件：{values.stopwordsPath}</p>}
+        </fieldset>
         <PathField label="自定义词典（可选）" value={values.customDictPath} placeholder="选择 .txt 词典文件" onChange={(customDictPath) => onChange("clean", { customDictPath })} onBrowse={() => onChoosePath("customDict")} buttonLabel="选择词典" />
       </div>
     );
@@ -450,10 +472,11 @@ function ParameterEditor({ route, configs, onChange, onChoosePath }: ParameterEd
       <div className="parameter-form parameter-grid">
         <NumberField label="主题数" value={values.numTopics} min={2} max={100} onChange={(numTopics) => onChange("lda", { numTopics })} />
         <NumberField label="训练轮数 (passes)" value={values.passes} min={1} max={500} onChange={(passes) => onChange("lda", { passes })} />
-        <NumberField label="单轮迭代数" value={values.iterations} min={10} max={2000} onChange={(iterations) => onChange("lda", { iterations })} />
-        <NumberField label="随机种子" value={values.randomState} min={0} max={999999} onChange={(randomState) => onChange("lda", { randomState })} />
-        <NumberField label="最小文档频率" value={values.minDocFreq} min={1} max={100} onChange={(minDocFreq) => onChange("lda", { minDocFreq })} />
+        <NumberField label="单轮迭代数" value={values.iterations} min={50} max={2000} onChange={(iterations) => onChange("lda", { iterations })} />
+        <NumberField label="随机种子" value={values.randomState} min={0} max={9999} onChange={(randomState) => onChange("lda", { randomState })} />
+        <NumberField label="最小文档频率" value={values.minDocFreq} min={1} max={50} onChange={(minDocFreq) => onChange("lda", { minDocFreq })} />
         <NumberField label="最大文档频率比例" value={values.maxDocFreqRatio} min={0.01} max={1} step={0.05} onChange={(maxDocFreqRatio) => onChange("lda", { maxDocFreqRatio })} />
+        <SelectField label="文类筛选" value={values.genre} options={[["全部文类", "全部文类"], ...genres.map((genre) => [genre, genre] as const)]} onChange={(genre) => onChange("lda", { genre })} />
       </div>
     );
   }
@@ -464,20 +487,39 @@ function ParameterEditor({ route, configs, onChange, onChoosePath }: ParameterEd
       <div className="parameter-form parameter-grid">
         <NumberField label="主题数" value={values.numTopics} min={2} max={100} onChange={(numTopics) => onChange("stm", { numTopics })} />
         <NumberField label="最大 EM 迭代" value={values.maxEmIterations} min={10} max={500} onChange={(maxEmIterations) => onChange("stm", { maxEmIterations })} />
-        <NumberField label="随机种子" value={values.randomState} min={0} max={999999} onChange={(randomState) => onChange("stm", { randomState })} />
-        <TextField label="prevalence 公式" value={values.prevalenceFormula} placeholder="~ newspaper + s(pub_year)" onChange={(prevalenceFormula) => onChange("stm", { prevalenceFormula })} />
+        <NumberField label="随机种子" value={values.randomState} min={0} max={9999} onChange={(randomState) => onChange("stm", { randomState })} />
+        <SelectField label="文类筛选" value={values.genre} options={[["全部文类", "全部文类"], ...genres.map((genre) => [genre, genre] as const)]} onChange={(genre) => onChange("stm", { genre })} />
+        <TextField label="prevalence 公式" value={values.prevalenceFormula} placeholder="~ newspaper" onChange={(prevalenceFormula) => onChange("stm", { prevalenceFormula })} />
         <TextField label="content 协变量（可选）" value={values.contentCovariate} placeholder="genre" onChange={(contentCovariate) => onChange("stm", { contentCovariate })} />
+        <div className={`environment-banner ${stmEnvironment.available === true ? "available" : stmEnvironment.available === false ? "unavailable" : ""}`}>
+          <strong>{stmEnvironment.available === true ? "R 环境可用" : stmEnvironment.available === false ? "R 环境不可用" : "R 环境待检查"}</strong>
+          <span>{stmEnvironment.message}</span>
+        </div>
+        <CovariateList items={toCovariates(importResult?.covariates)} />
       </div>
     );
   }
 
   if (route === "compare") {
     const values = configs.compare;
+    const selectedTopics = values.model === "stm"
+      ? toTopics(results.stm?.topics)
+      : values.model === "lda"
+        ? toTopics(results.lda?.topics)
+        : toTopics(results.lda?.topics).length ? toTopics(results.lda?.topics) : toTopics(results.stm?.topics);
+    const topicOptions: Array<readonly [string, string]> = [["__all__", "全部主题"], ...selectedTopics.map((topic) => [`topic_${topic.topic_id}`, topic.label || `主题 ${topic.topic_id + 1}`] as const)];
+    const newspapers = toStringArray(importResult?.newspapers);
+    const years = toStringArray(importResult?.years);
     return (
       <div className="parameter-form parameter-grid">
-        <SelectField label="主题模型" value={values.model} options={[["lda", "LDA"], ["stm", "STM"]]} onChange={(model) => onChange("compare", { model: model as "lda" | "stm" })} />
-        <SelectField label="聚合维度" value={values.axisField} options={[["newspaper", "报刊"], ["pub_year", "年份"], ["pub_month", "月份"], ["genre", "文类"], ["time_index", "时间索引"]]} onChange={(axisField) => onChange("compare", { axisField })} />
-        <SelectField label="图表类型" value={values.chartType} options={[["line", "趋势线"], ["bar", "柱状图"]]} onChange={(chartType) => onChange("compare", { chartType: chartType as "line" | "bar" })} />
+        <SelectField label="主题模型" value={values.model} options={[["auto", "自动（优先 LDA）"], ["lda", "LDA"], ["stm", "STM"]]} onChange={(model) => onChange("compare", { model: model as "auto" | "lda" | "stm" })} />
+        <SelectField label="聚合维度" value={values.axisField} options={[["newspaper", "报刊"], ["pub_year", "年份"], ["time_index", "时间序号"], ["genre", "文类"], ["dominant_topic", "主导主题"]]} onChange={(axisField) => onChange("compare", { axisField })} />
+        <SelectField label="纵轴指标" value={values.metricField} options={topicOptions} onChange={(metricField) => onChange("compare", { metricField })} />
+        <SelectField label="代表文章主题" value={values.topicField} options={topicOptions} onChange={(topicField) => onChange("compare", { topicField })} />
+        <SelectField label="报刊筛选" value={values.newspaper} options={[["__all__", "全部"], ...newspapers.map((item) => [item, item] as const)]} onChange={(newspaper) => onChange("compare", { newspaper })} />
+        <SelectField label="年份筛选" value={values.year} options={[["__all__", "全部"], ...years.map((item) => [item, item] as const)]} onChange={(year) => onChange("compare", { year })} />
+        <SelectField label="文类筛选" value={values.genre} options={[["__all__", "全部"], ...genres.map((item) => [item, item] as const)]} onChange={(genre) => onChange("compare", { genre })} />
+        <SelectField label="图表类型" value={values.chartType} options={[["bar", "柱状图"], ["line", "折线图"]]} onChange={(chartType) => onChange("compare", { chartType: chartType as "line" | "bar" })} />
         <NumberField label="每主题代表文章数" value={values.representativeLimit} min={1} max={20} onChange={(representativeLimit) => onChange("compare", { representativeLimit })} />
       </div>
     );
@@ -496,6 +538,10 @@ function ParameterEditor({ route, configs, onChange, onChoosePath }: ParameterEd
       </div>
       <fieldset className="export-options">
         <legend>导出项目</legend>
+        <div className="button-row compact-buttons">
+          <button className="ghost-button" type="button" onClick={() => onChange("export", { items: exportOptions.map(([key]) => key) })}>全选</button>
+          <button className="ghost-button" type="button" onClick={() => onChange("export", { items: [] })}>全不选</button>
+        </div>
         <div className="toggle-grid">
           {exportOptions.map(([key, label]) => <ToggleField key={key} label={label} checked={values.items.includes(key)} onChange={(checked) => toggleItem(key, checked)} />)}
         </div>
@@ -557,6 +603,296 @@ function PathField({ label, value, placeholder, buttonLabel, onChange, onBrowse 
   );
 }
 
+function WorkflowResultPanel({ route, result, summary, logs, onClearLogs }: { route: WorkflowRouteKey; result: TaskResult; summary: WorkflowSummary; logs: string[]; onClearLogs: () => void }) {
+  if (route === "clean") return <CleanResultPanel result={result} />;
+  if (route === "lda") return <ModelResultPanel title="LDA 训练结果" result={result} coherence={summary.ldaCoherence} />;
+  if (route === "stm") return <ModelResultPanel title="STM 训练结果" result={result} showPrevalence />;
+  if (route === "compare") return <CompareResultPanel result={result} />;
+  if (route === "export") return <ExportResultPanel result={result} logs={logs} onClearLogs={onClearLogs} />;
+  return null;
+}
+
+function CleanResultPanel({ result }: { result: TaskResult }) {
+  const preview = toPreview(result?.preview);
+  const rows = preview.rows ?? [];
+  const [selectedIndex, setSelectedIndex] = useState(0);
+  const safeIndex = rows.length ? Math.min(selectedIndex, rows.length - 1) : 0;
+  const row = rows[safeIndex] ?? {};
+  return (
+    <section className="result-section">
+      <div className="result-heading"><Scissors size={19} /><span>清洗对比预览</span></div>
+      {!rows.length ? <EmptyResult text="完成清洗后，可逐篇比较原文、清洗文本和分词结果。" /> : (
+        <>
+          <label className="parameter-field article-selector">
+            <span>预览文章</span>
+            <select value={safeIndex} onChange={(event) => setSelectedIndex(Number(event.target.value))}>
+              {rows.map((item, index) => <option key={String(item.doc_id ?? index)} value={index}>{index + 1}. {String(item.article_title ?? item.doc_id ?? `文章 ${index + 1}`)}</option>)}
+            </select>
+          </label>
+          <div className="text-preview-grid">
+            <TextPreview title="原文" text={String(row.text ?? "")} />
+            <TextPreview title="清洗后文本" text={String(row.cleaned_text ?? "")} />
+            <TextPreview title={`分词结果（${Number(row.token_count ?? 0)} 词）`} text={String(row.tokens ?? "").split(" ").filter(Boolean).slice(0, 200).join(" / ")} />
+          </div>
+        </>
+      )}
+    </section>
+  );
+}
+
+function ModelResultPanel({ title, result, coherence, showPrevalence = false }: { title: string; result: TaskResult; coherence?: number | null; showPrevalence?: boolean }) {
+  const topics = toTopics(result?.topics);
+  const preview = toPreview(result?.documentTopics);
+  const prevalenceRows = toRows(result?.prevalence);
+  const prevalenceColumns = toStringArray(result?.prevalenceColumns);
+  const [visualizationMessage, setVisualizationMessage] = useState("");
+  const openLdaVisualization = async () => {
+    setVisualizationMessage("正在生成 pyLDAvis...");
+    try {
+      const response = await invoke<{ ok: boolean; data?: Record<string, unknown>; error?: { message?: string } }>("run_python_task", { task: "lda-vis", payload: {} });
+      if (!response.ok) throw new Error(response.error?.message || "pyLDAvis 生成失败");
+      setVisualizationMessage(String(response.data?.message || response.data?.path || "pyLDAvis 已打开"));
+    } catch (error) {
+      setVisualizationMessage(error instanceof Error ? error.message : String(error));
+    }
+  };
+  return (
+    <section className="result-section">
+      <div className="result-heading"><Layers3 size={19} /><span>{title}</span>{coherence != null && <strong>Coherence (c_v)：{coherence.toFixed(4)}</strong>}</div>
+      {!topics.length ? <EmptyResult text="训练完成后显示主题关键词、文档主题分布和模型指标。" /> : (
+        <>
+          <div className="topic-card-grid">
+            {topics.map((topic) => (
+              <article className="topic-card" key={topic.topic_id}>
+                <strong>主题 {topic.topic_id + 1}</strong>
+                <div className="topic-words">{topic.words.slice(0, 10).map(([word, weight]) => <span key={word}>{word}{weight > 0 ? `（${weight.toFixed(3)}）` : ""}</span>)}</div>
+              </article>
+            ))}
+          </div>
+          {!showPrevalence && <div className="button-row"><button className="ghost-button" type="button" onClick={openLdaVisualization}><Activity size={16} />在浏览器中打开 pyLDAvis</button>{visualizationMessage && <span className="field-note">{visualizationMessage}</span>}</div>}
+          {showPrevalence && prevalenceRows.length > 0 && (
+            <div className="result-block">
+              <h3>协变量效应（Prevalence）</h3>
+              <ResultTable columns={prevalenceColumns} rows={prevalenceRows} />
+            </div>
+          )}
+          <div className="result-block">
+            <h3>文档主题分布（前 200 行）</h3>
+            <ResultTable columns={preview.columns ?? []} rows={preview.rows ?? []} />
+          </div>
+        </>
+      )}
+    </section>
+  );
+}
+
+function CompareResultPanel({ result }: { result: TaskResult }) {
+  const rows = toRows(result?.rows);
+  const topicColumns = toStringArray(result?.topicColumns);
+  const axisField = typeof result?.axisField === "string" ? result.axisField : "newspaper";
+  const chartType = result?.chartType === "line" ? "line" : "bar";
+  const articleGroups = toRecord(result?.representativeArticles);
+  const articles: Array<Record<string, unknown> & { _topic: string }> = Object.entries(articleGroups).flatMap(([topic, value]) => toRows(value).map((article) => ({ ...article, _topic: topic })));
+  const [selectedDocId, setSelectedDocId] = useState("");
+  const selectedArticle = articles.find((article) => String(article.doc_id ?? "") === selectedDocId) ?? articles[0];
+  return (
+    <section className="result-section">
+      <div className="result-heading"><SplitSquareHorizontal size={19} /><span>主题分布对比</span></div>
+      {!rows.length ? <EmptyResult text="生成对比视图后显示图表、聚合表和代表文章。" /> : (
+        <>
+          <CompareChart rows={rows} axisField={axisField} topicColumns={topicColumns} chartType={chartType} />
+          <div className="result-block">
+            <h3>聚合数据</h3>
+            <ResultTable columns={[axisField, ...topicColumns]} rows={rows} />
+          </div>
+          <div className="article-browser">
+            <div className="result-block">
+              <h3>主题代表文章</h3>
+              <div className="article-list">
+                {articles.map((article, index) => {
+                  const docId = String(article.doc_id ?? index);
+                  return <button className={selectedArticle === article ? "article-item active" : "article-item"} type="button" key={`${article._topic}-${docId}`} onClick={() => setSelectedDocId(docId)}><strong>{String(article._topic).replace("topic_", "主题 ")}</strong><span>{String(article.article_title || "（无标题）")}</span><small>{String(article.newspaper ?? "")} · 权重 {formatCell(article[article._topic])}</small></button>;
+                })}
+              </div>
+            </div>
+            <div className="article-text-panel">
+              <h3>{String(selectedArticle?.article_title ?? "请选择代表文章")}</h3>
+              <p>{[selectedArticle?.newspaper, selectedArticle?.pub_date, selectedArticle?.author, selectedArticle?.genre].filter(Boolean).map(String).join("  |  ")}</p>
+              <div>{String(selectedArticle?.text ?? "暂无原文")}</div>
+            </div>
+          </div>
+        </>
+      )}
+    </section>
+  );
+}
+
+function CompareChart({ rows, axisField, topicColumns, chartType }: { rows: Array<Record<string, unknown>>; axisField: string; topicColumns: string[]; chartType: "line" | "bar" }) {
+  const visibleTopics = topicColumns.slice(0, 8);
+  const maxValue = Math.max(0.0001, ...rows.flatMap((row) => visibleTopics.map((topic) => Number(row[topic] ?? 0))));
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [exportMessage, setExportMessage] = useState("");
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const context = canvas.getContext("2d");
+    if (!context) return;
+    const width = canvas.width;
+    const height = canvas.height;
+    const left = 90;
+    const right = 30;
+    const top = 42;
+    const bottom = 90;
+    const plotWidth = width - left - right;
+    const plotHeight = height - top - bottom;
+    context.fillStyle = "#f8fafc";
+    context.fillRect(0, 0, width, height);
+    context.strokeStyle = "#cfd8e3";
+    context.lineWidth = 2;
+    context.beginPath();
+    context.moveTo(left, top);
+    context.lineTo(left, top + plotHeight);
+    context.lineTo(left + plotWidth, top + plotHeight);
+    context.stroke();
+    context.font = "22px Microsoft YaHei, sans-serif";
+    context.fillStyle = "#172033";
+    context.fillText("主题分布对比", left, 28);
+
+    const stepX = plotWidth / Math.max(rows.length, 1);
+    visibleTopics.forEach((topic, topicIndex) => {
+      const color = `hsl(${topicIndex * 47} 65% 45%)`;
+      context.strokeStyle = color;
+      context.fillStyle = color;
+      context.lineWidth = 4;
+      if (chartType === "line") context.beginPath();
+      rows.forEach((row, rowIndex) => {
+        const value = Number(row[topic] ?? 0);
+        const x = left + stepX * rowIndex + stepX / 2;
+        const y = top + plotHeight - value / maxValue * plotHeight;
+        if (chartType === "line") {
+          if (rowIndex === 0) context.moveTo(x, y); else context.lineTo(x, y);
+        } else {
+          const barWidth = Math.max(4, stepX * 0.75 / Math.max(visibleTopics.length, 1));
+          const barX = left + stepX * rowIndex + stepX * 0.125 + topicIndex * barWidth;
+          context.fillRect(barX, y, barWidth * 0.85, top + plotHeight - y);
+        }
+      });
+      if (chartType === "line") context.stroke();
+    });
+    context.font = "17px Microsoft YaHei, sans-serif";
+    context.fillStyle = "#596779";
+    rows.forEach((row, index) => {
+      const label = String(row[axisField] ?? "").slice(0, 12);
+      const x = left + stepX * index + stepX / 2;
+      context.save();
+      context.translate(x, top + plotHeight + 16);
+      context.rotate(-Math.PI / 7);
+      context.fillText(label, 0, 0);
+      context.restore();
+    });
+  }, [axisField, chartType, maxValue, rows, visibleTopics.join("|")]);
+
+  const exportChart = async () => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const path = await invoke<string | null>("select_chart_png_path");
+    if (!path) return;
+    const base64Data = canvas.toDataURL("image/png").split(",")[1];
+    await invoke("save_chart_png", { path, base64Data });
+    setExportMessage(`图表已保存：${path}`);
+  };
+
+  return (
+    <div className="compare-chart" role="img" aria-label={chartType === "line" ? "主题趋势折线图" : "主题分布柱状图"}>
+      <canvas ref={canvasRef} width={1600} height={600} />
+      <div className="button-row compact-buttons"><button className="ghost-button" type="button" onClick={exportChart}><Download size={16} />导出当前图表 PNG</button>{exportMessage && <span className="field-note">{exportMessage}</span>}</div>
+    </div>
+  );
+}
+
+function ExportResultPanel({ result, logs, onClearLogs }: { result: TaskResult; logs: string[]; onClearLogs: () => void }) {
+  const exported = toStringArray(result?.exported);
+  const errors = toRows(result?.errors);
+  return (
+    <section className="result-section">
+      <div className="result-heading"><Download size={19} /><span>导出结果与处理日志</span></div>
+      <div className="export-result-layout">
+        <div>
+          <h3>成功文件</h3>
+          {exported.length ? <ul className="file-result-list">{exported.map((filename) => <li key={filename}><CheckCircle2 size={15} />{filename}</li>)}</ul> : <EmptyResult text="尚未导出文件" />}
+          {errors.length > 0 && <><h3>未导出项目</h3><ul className="error-result-list">{errors.map((item, index) => <li key={`${item.key}-${index}`}><AlertTriangle size={15} />{String(item.label ?? item.key)}：{String(item.error ?? "未知错误")}</li>)}</ul></>}
+        </div>
+        <div className="log-panel">
+          <div className="log-header"><h3>处理日志</h3><button className="ghost-button" type="button" onClick={onClearLogs}>清除日志</button></div>
+          <pre>{logs.length ? logs.join("\n") : "暂无处理日志"}</pre>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function CovariateList({ items }: { items: Array<{ field: string; available: boolean; reason?: string }> }) {
+  if (!items.length) return <p className="field-note">完成导入后显示可用协变量。</p>;
+  return <div className="covariate-list">{items.map((item) => <span className={item.available ? "available" : "unavailable"} key={item.field} title={item.reason || "可用于 STM 协变量"}>{item.field}{item.available ? "" : `（${item.reason || "不可用"}）`}</span>)}</div>;
+}
+
+function TextPreview({ title, text }: { title: string; text: string }) {
+  return <article className="text-preview"><strong>{title}</strong><div>{text || "（空）"}</div></article>;
+}
+
+function EmptyResult({ text }: { text: string }) {
+  return <p className="empty-result">{text}</p>;
+}
+
+function ResultTable({ columns, rows, emptyText = "暂无数据" }: { columns: string[]; rows: Array<Record<string, unknown>>; emptyText?: string }) {
+  const visibleColumns = columns.slice(0, 18);
+  if (!visibleColumns.length || !rows.length) return <p className="empty-result">{emptyText}</p>;
+  return (
+    <div className="table-scroll">
+      <table className="data-table">
+        <thead><tr>{visibleColumns.map((column) => <th key={column}>{column}</th>)}</tr></thead>
+        <tbody>{rows.map((row, rowIndex) => <tr key={rowIndex}>{visibleColumns.map((column) => <td key={column}>{formatCell(row[column])}</td>)}</tr>)}</tbody>
+      </table>
+    </div>
+  );
+}
+
+function toRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function toRows(value: unknown): Array<Record<string, unknown>> {
+  return Array.isArray(value) ? value.filter((item) => item && typeof item === "object" && !Array.isArray(item)) as Array<Record<string, unknown>> : [];
+}
+
+function toStringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.map(String) : [];
+}
+
+function toPreview(value: unknown): PreviewResult {
+  const preview = toRecord(value);
+  return { columns: toStringArray(preview.columns), rows: toRows(preview.rows), total: Number(preview.total ?? 0) };
+}
+
+function toTopics(value: unknown): TopicResult[] {
+  return toRows(value).map((topic) => ({
+    topic_id: Number(topic.topic_id ?? 0),
+    label: typeof topic.label === "string" ? topic.label : undefined,
+    words: Array.isArray(topic.words) ? topic.words.filter(Array.isArray).map((pair) => [String(pair[0]), Number(pair[1] ?? 0)] as [string, number]) : []
+  }));
+}
+
+function toCovariates(value: unknown) {
+  return toRows(value).map((item) => ({ field: String(item.field ?? ""), available: item.available === true, reason: typeof item.reason === "string" ? item.reason : undefined })).filter((item) => item.field);
+}
+
+function formatCell(value: unknown) {
+  if (typeof value === "number") return Number.isFinite(value) ? value.toFixed(4) : "";
+  const text = value == null ? "" : String(value);
+  return text.length > 120 ? `${text.slice(0, 120)}…` : text;
+}
+
 const pageDefinitions: Record<WorkflowRouteKey, PageDefinition> = {
   import: {
     task: "import",
@@ -571,8 +907,8 @@ const pageDefinitions: Record<WorkflowRouteKey, PageDefinition> = {
     task: "clean",
     primaryAction: "启动清洗任务",
     cards: [
-      { title: "清洗参数", icon: <Scissors size={18} />, body: () => "开关类参数与阈值分区展示，后续映射到 CleanOptionsPayload。" },
-      { title: "样例预览", icon: <Table2 size={18} />, body: () => "同屏比较原文、清洗后文本和分词结果，便于调整停用词。" },
+      { title: "清洗参数", icon: <Scissors size={18} />, body: () => "OCR、标点、数字、繁简、停用词和词频参数会直接传入清洗任务。" },
+      { title: "逐篇预览", icon: <Table2 size={18} />, body: () => "清洗完成后可逐篇比较原文、清洗后文本和分词结果。" },
       { title: "语料统计", icon: <Database size={18} />, body: (summary) => `有效文档 ${summary.cleanDocuments} 篇，词元 ${summary.totalTokens} 个，唯一词 ${summary.uniqueWords} 个。` }
     ]
   },
@@ -582,7 +918,7 @@ const pageDefinitions: Record<WorkflowRouteKey, PageDefinition> = {
     cards: [
       { title: "主题关键词", icon: <Layers3 size={18} />, body: (summary) => `当前 ${summary.ldaTopics} 个主题，展示每个主题前 10 个关键词。` },
       { title: "一致性指标", icon: <BarChart3 size={18} />, body: (summary) => `Coherence：${summary.ldaCoherence ?? "待训练"}。` },
-      { title: "可视化入口", icon: <Activity size={18} />, body: () => "保留 pyLDAvis 生成入口，作为独立长任务接入。" }
+      { title: "可视化入口", icon: <Activity size={18} />, body: () => "训练完成后可生成 pyLDAvis 并在系统浏览器中打开。" }
     ]
   },
   stm: {
@@ -591,7 +927,7 @@ const pageDefinitions: Record<WorkflowRouteKey, PageDefinition> = {
     cards: [
       { title: "环境检查", icon: <Activity size={18} />, body: () => "展示 R、rpy2 与 stm 包可用性，并提供失败详情。" },
       { title: "协变量", icon: <Table2 size={18} />, body: () => "字段可用性、缺失值和低基数原因会集中展示。" },
-      { title: "prevalence 摘要", icon: <BarChart3 size={18} />, body: (summary) => `当前 ${summary.stmTopics} 个 STM 主题，等待后端返回协变量效应。` }
+      { title: "prevalence 摘要", icon: <BarChart3 size={18} />, body: (summary) => `当前 ${summary.stmTopics} 个 STM 主题，训练后展示协变量效应。` }
     ]
   },
   compare: {
@@ -607,7 +943,7 @@ const pageDefinitions: Record<WorkflowRouteKey, PageDefinition> = {
     task: "export",
     primaryAction: "导出选中项目",
     cards: [
-      { title: "可导出项目", icon: <Download size={18} />, body: () => "按前置结果启用或禁用导出项，并展示缺失原因。" },
+      { title: "可导出项目", icon: <Download size={18} />, body: () => "支持十类结果全选、全不选与逐项导出，缺失结果会单独报告。" },
       { title: "结果摘要", icon: <CheckCircle2 size={18} />, body: (summary) => `已导出 ${summary.exportFiles} 个文件，部分失败会保留明细。` },
       { title: "处理日志", icon: <Table2 size={18} />, body: () => "展示最近日志行，并保留清空和复制入口。" }
     ]

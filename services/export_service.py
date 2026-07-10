@@ -16,11 +16,24 @@ EXPORT_ITEMS = (
 )
 
 
+def _is_available(value: Any) -> bool:
+    """判断导出结果是否存在，避免对 pandas 对象做含糊的真值比较。"""
+    if value is None:
+        return False
+    if isinstance(value, (list, tuple, set, frozenset, dict)):
+        return len(value) > 0
+
+    empty = getattr(value, "empty", None)
+    if empty is not None:
+        return not bool(empty)
+    return True
+
+
 def list_export_items(state: Any) -> List[Dict[str, Any]]:
     items = []
     for key, filename, label, attribute in EXPORT_ITEMS:
         value = getattr(state, attribute, None)
-        available = bool(value is not None and value != [] and value != {})
+        available = _is_available(value)
         items.append({
             "key": key,
             "filename": filename,

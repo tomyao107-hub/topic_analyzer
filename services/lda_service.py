@@ -181,7 +181,9 @@ def open_pyldavis(model: Any, corpus: Any, dictionary: Any, output_dir: str) -> 
     out_path = os.path.join(output_dir, "lda_vis.html")
 
     logger.info("生成 pyLDAvis 可视化...")
-    vis = gensimvis.prepare(model, corpus, dictionary, sort_topics=False)
+    # mmds avoids the complex eigenvalues that PCoA can produce on very small
+    # or highly symmetric corpora, which otherwise cannot be serialized to JSON.
+    vis = gensimvis.prepare(model, corpus, dictionary, sort_topics=False, mds="mmds")
     pyLDAvis.save_html(vis, out_path)
     logger.info(f"pyLDAvis 已保存至 {out_path}")
     webbrowser.open(f"file://{os.path.abspath(out_path)}")

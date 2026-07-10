@@ -1,6 +1,6 @@
 # Tauri 前端工程
 
-这是历史报刊主题分析工具的迁移期 Tauri + 现代前端骨架。现有 PySide6 入口仍保留在项目根目录的 `main.py` 和 `run.bat`，本目录只承载新版桌面界面。
+这是历史报刊主题分析工具的 Tauri + React 桌面端。现有 PySide6 入口仍保留在项目根目录的 `main.py` 和 `run.bat`；新版桌面端已接入相同的导入、清洗、LDA、STM、对比和导出服务。
 
 ## 技术栈
 
@@ -31,10 +31,10 @@ npm run dev
 ```text
 desktop/
 ├── src/                 # 现代前端界面
-│   ├── App.tsx          # 主布局、导航和页面占位
+│   ├── App.tsx          # 主布局、参数表单和结果视图
 │   ├── routes.tsx       # 页面路由元数据
 │   └── state/           # 前端状态管理
 └── src-tauri/           # Tauri 桌面壳配置
 ```
 
-后续 Task 4/5 会在当前骨架上补齐页面原型，并按既定 JSON Lines bridge 接入 Python 计算层。
+Python 计算通过 `backend.bridge` 的 JSON 协议调用。文件选择、停用词加载、输出目录选择和图表 PNG 保存由 Tauri 原生命令提供。
