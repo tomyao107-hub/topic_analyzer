@@ -27,6 +27,8 @@ desktop/dist/
 # Tauri / Rust generated output
 desktop/src-tauri/target/
 desktop/src-tauri/gen/
+desktop/src-tauri/binaries/*.exe
+build/
 
 # IDE and OS metadata
 .trae/

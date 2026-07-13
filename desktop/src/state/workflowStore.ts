@@ -2,7 +2,7 @@ import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 
 export type LanguageCode = "zh" | "en";
-export type RouteKey = "welcome" | "import" | "clean" | "lda" | "stm" | "compare" | "export";
+export type RouteKey = "welcome" | "import" | "clean" | "frequency" | "lda" | "stm" | "compare" | "export";
 export type TaskKey = Exclude<RouteKey, "welcome">;
 export type TaskStatus = "idle" | "running" | "succeeded" | "failed";
 export type TaskResult = Record<string, unknown> | null;
@@ -10,11 +10,12 @@ export type TaskResult = Record<string, unknown> | null;
 export type WorkflowFlags = {
   imported: boolean;
   cleaned: boolean;
+  frequencyDone: boolean;
   ldaDone: boolean;
   stmDone: boolean;
 };
 
-export type LanguageWorkflow = Record<LanguageCode, { cleaned: boolean; ldaDone: boolean; stmDone: boolean }>;
+export type LanguageWorkflow = Record<LanguageCode, { cleaned: boolean; frequencyDone: boolean; ldaDone: boolean; stmDone: boolean }>;
 
 export type WorkflowSummary = {
   documentRows: number;
@@ -22,6 +23,7 @@ export type WorkflowSummary = {
   cleanDocuments: number;
   totalTokens: Record<LanguageCode, number>;
   uniqueWords: Record<LanguageCode, number>;
+  frequencyWords: Record<LanguageCode, number>;
   ldaTopics: Record<LanguageCode, number>;
   ldaCoherence: Record<LanguageCode, number | null>;
   stmTopics: Record<LanguageCode, number>;
@@ -80,6 +82,14 @@ export type LdaParams = {
   genre: string;
 };
 
+export type FrequencyParams = {
+  sortBy: "term_frequency" | "document_frequency";
+  topN: number;
+  minTermFrequency: number;
+  minDocumentFrequency: number;
+  randomState: number;
+};
+
 export type StmParams = {
   numTopics: number;
   prevalenceFormula: string;
@@ -108,6 +118,8 @@ export type ExportConfig = {
 
 export type WorkflowConfigs = {
   clean: CleanConfig;
+  frequencyLanguage: LanguageCode;
+  frequency: Record<LanguageCode, FrequencyParams>;
   ldaLanguage: LanguageCode;
   lda: Record<LanguageCode, LdaParams>;
   stmLanguage: LanguageCode;
@@ -121,6 +133,7 @@ type LanguageResults = Record<LanguageCode, TaskResult>;
 export type WorkflowResults = {
   import: TaskResult;
   clean: TaskResult;
+  frequency: LanguageResults;
   lda: LanguageResults;
   stm: LanguageResults;
   compare: LanguageResults;
@@ -164,8 +177,8 @@ type WorkflowState = {
   setActiveRoute: (route: RouteKey) => void;
   setImportConfig: (values: Partial<ImportConfig>) => void;
   setTaskConfig: <K extends ConfigTaskKey>(task: K, values: Partial<WorkflowConfigs[K]>) => void;
-  setModelLanguage: (model: "lda" | "stm", language: LanguageCode) => void;
-  setModelConfig: (model: "lda" | "stm", language: LanguageCode, values: Partial<LdaParams & StmParams>) => void;
+  setModelLanguage: (model: "frequency" | "lda" | "stm", language: LanguageCode) => void;
+  setModelConfig: (model: "frequency" | "lda" | "stm", language: LanguageCode, values: Partial<FrequencyParams & LdaParams & StmParams>) => void;
   setLanguageCleanConfig: (language: LanguageCode, values: Partial<LanguageCleanConfig>) => void;
   chooseImportFile: () => Promise<void>;
   chooseConfigPath: (target: "customDict" | "stopwords" | "outputDir", language?: LanguageCode) => Promise<void>;
@@ -177,11 +190,11 @@ type WorkflowState = {
 const now = () => new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 const languages: LanguageCode[] = ["zh", "en"];
 const labels: Record<TaskKey, string> = {
-  import: "导入文献", clean: "双语清洗", lda: "LDA 训练", stm: "STM 训练", compare: "对比分析", export: "导出结果"
+  import: "导入文献", clean: "双语清洗", frequency: "词频与词云", lda: "LDA 训练", stm: "STM 训练", compare: "对比分析", export: "导出结果"
 };
 const phases: Record<TaskKey, string> = {
   import: "字段识别与严格校验", clean: "语言感知清洗与分词", lda: "分语言 LDA 训练",
-  stm: "分语言 STM 训练", compare: "历史元数据聚合", export: "按语言重建并写入结果"
+  frequency: "分语言词频统计与词云", stm: "分语言 STM 训练", compare: "历史元数据聚合", export: "按语言重建并写入结果"
 };
 
 const createTask = (key: TaskKey): TaskState => ({
@@ -190,19 +203,21 @@ const createTask = (key: TaskKey): TaskState => ({
 });
 const createTasks = () => Object.fromEntries((Object.keys(labels) as TaskKey[]).map((key) => [key, createTask(key)])) as Record<TaskKey, TaskState>;
 const emptyLanguageResults = (): LanguageResults => ({ zh: null, en: null });
-const createResults = (): WorkflowResults => ({ import: null, clean: null, lda: emptyLanguageResults(), stm: emptyLanguageResults(), compare: emptyLanguageResults(), export: null });
+const createResults = (): WorkflowResults => ({ import: null, clean: null, frequency: emptyLanguageResults(), lda: emptyLanguageResults(), stm: emptyLanguageResults(), compare: emptyLanguageResults(), export: null });
 const emptyLanguageWorkflow = (): LanguageWorkflow => ({
-  zh: { cleaned: false, ldaDone: false, stmDone: false },
-  en: { cleaned: false, ldaDone: false, stmDone: false }
+  zh: { cleaned: false, frequencyDone: false, ldaDone: false, stmDone: false },
+  en: { cleaned: false, frequencyDone: false, ldaDone: false, stmDone: false }
 });
 const emptySummary = (): WorkflowSummary => ({
   documentRows: 0, languageRows: { zh: 0, en: 0 }, cleanDocuments: 0,
   totalTokens: { zh: 0, en: 0 }, uniqueWords: { zh: 0, en: 0 },
+  frequencyWords: { zh: 0, en: 0 },
   ldaTopics: { zh: 0, en: 0 }, ldaCoherence: { zh: null, en: null },
   stmTopics: { zh: 0, en: 0 }, exportFiles: 0
 });
 
 const defaultLda = (): LdaParams => ({ numTopics: 10, passes: 20, iterations: 400, randomState: 42, minDocFreq: 2, maxDocFreqRatio: 0.95, genre: "__all__" });
+const defaultFrequency = (): FrequencyParams => ({ sortBy: "term_frequency", topN: 50, minTermFrequency: 1, minDocumentFrequency: 1, randomState: 42 });
 const defaultStm = (): StmParams => ({ numTopics: 10, prevalenceFormula: "~ 1", contentCovariate: "", maxEmIterations: 75, randomState: 42, genre: "__all__" });
 const parseStopwords = (text: string) => [...new Set(text.split(/\r?\n/).map((word) => word.trim()).filter(Boolean))];
 
@@ -232,10 +247,12 @@ const backendPayload = (task: TaskKey, state: WorkflowState) => {
   const common = {
     ...session,
     ...cleanPayload(state.configs.clean),
+    frequencyConfigs: state.configs.frequency,
     ldaConfigs: state.configs.lda,
     stmConfigs: state.configs.stm
   };
   if (task === "clean") return common;
+  if (task === "frequency") return { ...common, language: state.configs.frequencyLanguage };
   if (task === "lda") return { ...common, language: state.configs.ldaLanguage };
   if (task === "stm") return { ...common, language: state.configs.stmLanguage };
   if (task === "compare") return { ...common, ...state.configs.compare };
@@ -253,6 +270,7 @@ const appendLogs = (existing: string[], incoming: string[] = []) => [...existing
 const taskSummary = (task: TaskKey, state: WorkflowState, data: Record<string, unknown>) => {
   if (task === "import") return `已导入 ${state.summary.documentRows} 篇文献（中文 ${state.summary.languageRows.zh}，英文 ${state.summary.languageRows.en}）`;
   if (task === "clean") return `已生成 ${state.summary.cleanDocuments} 篇有效语料`;
+  if (task === "frequency") return `${data.language === "en" ? "英文" : "中文"}词频分析完成，共显示 ${Array.isArray(data.rows) ? data.rows.length : 0} / ${String(data.filteredWords ?? 0)} 个词`;
   if (task === "export") return `已写入 ${String(data.count ?? state.summary.exportFiles)} 个文件`;
   const fallbackLanguage = task === "lda" ? state.configs.ldaLanguage : task === "stm" ? state.configs.stmLanguage : state.configs.compare.language;
   const language = String(data.language ?? fallbackLanguage);
@@ -263,7 +281,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
   activeRoute: "welcome",
   projectName: "未命名项目",
   outputDir: "",
-  workflow: { imported: false, cleaned: false, ldaDone: false, stmDone: false },
+  workflow: { imported: false, cleaned: false, frequencyDone: false, ldaDone: false, stmDone: false },
   languageWorkflow: emptyLanguageWorkflow(),
   summary: emptySummary(),
   importConfig: { dataPath: "", fieldMapping: { doc_id: "doc_id", text: "text", language: "language" } },
@@ -274,12 +292,13 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       zh: { useDefaultStopwords: true, stopwordsText: "", stopwordsPath: "", minTokenLength: 1, customDictPath: "", traditionalToSimplified: false },
       en: { useDefaultStopwords: true, stopwordsText: "", stopwordsPath: "", minTokenLength: 2, lowercase: true, repairHyphenation: true }
     },
+    frequencyLanguage: "zh", frequency: { zh: defaultFrequency(), en: defaultFrequency() },
     ldaLanguage: "zh", lda: { zh: defaultLda(), en: defaultLda() },
     stmLanguage: "zh", stm: { zh: defaultStm(), en: defaultStm() },
     compare: { language: "zh", model: "lda", axisField: "source_name", metricField: "__all__", filters: {}, representativeLimit: 3, chartType: "bar" },
     export: {
       projectName: "未命名项目", outputDir: "", languages: ["zh", "en"],
-      items: ["documents", "cleaned_documents", "tokens_corpus", "lda_topic_word", "lda_doc_topic", "lda_coherence", "stm_topic_word", "stm_doc_topic", "stm_prevalence", "session_config"]
+      items: ["documents", "cleaned_documents", "tokens_corpus", "word_frequency", "word_cloud", "lda_topic_word", "lda_doc_topic", "lda_coherence", "stm_topic_word", "stm_doc_topic", "stm_prevalence", "session_config"]
     }
   },
   tasks: createTasks(),
@@ -318,7 +337,13 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
     set((state) => ({
       logs: appendLogs(state.logs, [`[${now()}] ${labels[task]}：开始`]),
       tasks: { ...state.tasks, [task]: { ...state.tasks[task], status: "running", phase: phases[task], message: "处理中…", progress: null, error: "", updatedAt: now() } },
-      ...(task === "import" ? { results: createResults(), workflow: { imported: false, cleaned: false, ldaDone: false, stmDone: false }, languageWorkflow: emptyLanguageWorkflow(), summary: emptySummary() } : {})
+      ...(task === "import" ? { results: createResults(), workflow: { imported: false, cleaned: false, frequencyDone: false, ldaDone: false, stmDone: false }, languageWorkflow: emptyLanguageWorkflow(), summary: emptySummary() } : {}),
+      ...(task === "clean" ? {
+        results: { ...state.results, clean: null, frequency: emptyLanguageResults(), lda: emptyLanguageResults(), stm: emptyLanguageResults(), compare: emptyLanguageResults(), export: null },
+        workflow: { ...state.workflow, cleaned: false, frequencyDone: false, ldaDone: false, stmDone: false },
+        languageWorkflow: emptyLanguageWorkflow(),
+        summary: { ...state.summary, cleanDocuments: 0, totalTokens: { zh: 0, en: 0 }, uniqueWords: { zh: 0, en: 0 }, frequencyWords: { zh: 0, en: 0 }, ldaTopics: { zh: 0, en: 0 }, ldaCoherence: { zh: null, en: null }, stmTopics: { zh: 0, en: 0 }, exportFiles: 0 }
+      } : {})
     }));
     try {
       const state = get();
@@ -330,6 +355,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
       const data = response.data ?? {};
       set((current) => {
         const incomingSummary = response.state?.summary;
+        const incomingFrequencyWords: Partial<Record<LanguageCode, number>> = incomingSummary?.frequencyWords ?? {};
         const incomingLdaTopics: Partial<Record<LanguageCode, number>> = incomingSummary?.ldaTopics ?? {};
         const incomingLdaCoherence: Partial<Record<LanguageCode, number | null>> = incomingSummary?.ldaCoherence ?? {};
         const incomingStmTopics: Partial<Record<LanguageCode, number>> = incomingSummary?.stmTopics ?? {};
@@ -339,6 +365,10 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
           languageRows: { ...current.summary.languageRows, ...(incomingSummary?.languageRows ?? {}) },
           totalTokens: { ...current.summary.totalTokens, ...(incomingSummary?.totalTokens ?? {}) },
           uniqueWords: { ...current.summary.uniqueWords, ...(incomingSummary?.uniqueWords ?? {}) },
+          frequencyWords: {
+            zh: Number(incomingFrequencyWords.zh ?? 0) > 0 ? Number(incomingFrequencyWords.zh) : current.summary.frequencyWords.zh,
+            en: Number(incomingFrequencyWords.en ?? 0) > 0 ? Number(incomingFrequencyWords.en) : current.summary.frequencyWords.en
+          },
           ldaTopics: {
             zh: Number(incomingLdaTopics.zh ?? 0) > 0 ? Number(incomingLdaTopics.zh) : current.summary.ldaTopics.zh,
             en: Number(incomingLdaTopics.en ?? 0) > 0 ? Number(incomingLdaTopics.en) : current.summary.ldaTopics.en
@@ -357,6 +387,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
           const incoming = response.state?.languageWorkflow?.[language];
           languageWorkflow[language] = {
             cleaned: languageWorkflow[language].cleaned || incoming?.cleaned === true,
+            frequencyDone: languageWorkflow[language].frequencyDone || incoming?.frequencyDone === true,
             ldaDone: languageWorkflow[language].ldaDone || incoming?.ldaDone === true,
             stmDone: languageWorkflow[language].stmDone || incoming?.stmDone === true
           };
@@ -364,12 +395,13 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
         const workflow = {
           imported: current.workflow.imported || response.state?.workflow?.imported === true,
           cleaned: current.workflow.cleaned || response.state?.workflow?.cleaned === true,
+          frequencyDone: current.workflow.frequencyDone || response.state?.workflow?.frequencyDone === true,
           ldaDone: current.workflow.ldaDone || response.state?.workflow?.ldaDone === true,
           stmDone: current.workflow.stmDone || response.state?.workflow?.stmDone === true
         };
         const results = { ...current.results };
-        if (task === "lda" || task === "stm" || task === "compare") {
-          const fallbackLanguage = task === "lda" ? current.configs.ldaLanguage : task === "stm" ? current.configs.stmLanguage : current.configs.compare.language;
+        if (task === "frequency" || task === "lda" || task === "stm" || task === "compare") {
+          const fallbackLanguage = task === "frequency" ? current.configs.frequencyLanguage : task === "lda" ? current.configs.ldaLanguage : task === "stm" ? current.configs.stmLanguage : current.configs.compare.language;
           const language: LanguageCode = data.language === "en" ? "en" : data.language === "zh" ? "zh" : fallbackLanguage;
           results[task] = { ...results[task], [language]: data } as never;
         } else {

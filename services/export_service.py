@@ -1,11 +1,16 @@
-"""导出能力的共享可用性描述。"""
+"""共享导出能力与可用性描述。"""
+import os
 from typing import Any, Dict, List
+
+import pandas as pd
 
 
 EXPORT_ITEMS = (
     ("merged_data", "merged_data.csv", "合并后的主数据集", "merged_df"),
     ("cleaned_records", "cleaned_records.csv", "清洗后的记录", "cleaned_df"),
     ("cleaned_corpus", "tokens_corpus.txt", "分词结果语料", "tokens_list"),
+    ("word_frequency", "word_frequency.csv", "词频明细", "frequency_results"),
+    ("word_cloud", "word_cloud.png", "词云 PNG", "frequency_results"),
     ("lda_topic_word", "lda_topic_word.csv", "LDA 主题词", "lda_topics"),
     ("lda_doc_topic", "lda_doc_topic.csv", "LDA 文档主题分布", "lda_doc_topics"),
     ("lda_coherence", "lda_coherence.json", "LDA 一致性指标", "lda_coherence"),
@@ -42,3 +47,28 @@ def list_export_items(state: Any) -> List[Dict[str, Any]]:
             "reason": None if available else "尚未生成对应结果",
         })
     return items
+
+
+def write_frequency_outputs(
+    language_dir: str,
+    rows: List[Dict[str, Any]],
+    png: bytes,
+    selected: set,
+) -> List[str]:
+    """Write v2.1 frequency artifacts with one shared CSV/PNG contract."""
+    exported: List[str] = []
+    language = os.path.basename(os.path.normpath(language_dir))
+    if "word_frequency" in selected:
+        columns = [
+            "rank", "word", "term_frequency", "document_frequency",
+            "document_frequency_ratio", "token_share",
+        ]
+        pd.DataFrame(rows, columns=columns).to_csv(
+            os.path.join(language_dir, "word_frequency.csv"), index=False, encoding="utf-8-sig"
+        )
+        exported.append(f"{language}/word_frequency.csv")
+    if "word_cloud" in selected:
+        with open(os.path.join(language_dir, "word_cloud.png"), "wb") as file:
+            file.write(png)
+        exported.append(f"{language}/word_cloud.png")
+    return exported

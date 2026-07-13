@@ -1,16 +1,17 @@
-# 历史文献主题分析工具 v2
+# 历史文献主题分析工具 v2.1
 
-面向数字人文与历史研究的中英文主题分析桌面工具。v2 使用一张文献表完成导入、清洗、LDA、STM、历史元数据对比和分语言导出。
+面向数字人文与历史研究的中英文主题分析桌面工具。v2.1 使用一张文献表完成导入、清洗、词频与词云、LDA、STM、历史元数据对比和分语言导出。
 
 后续数字人文分析能力的开发顺序、功能边界和验收标准见[《数字人文分析功能版本安排》](docs/DIGITAL_HUMANITIES_ROADMAP.md)。
 
-## v2 核心变化
+## v2.1 核心能力
 
 - 单表导入：不再接受“元数据表 + 文本表”双文件协议。
 - 双语预处理：中文使用 jieba；英文进行 Unicode 规范化、小写化、跨行断词修复和拉丁词分词。
 - 分语言建模：中文和英文拥有独立词表、LDA/STM 配置与结果。
 - 广义历史元数据：支持报刊、书信、日记、档案等材料，并保留所有自定义字段。
 - 可复现导出：`session_config.json` 使用 `schemaVersion: 2`，模型结果写入 `zh/`、`en/` 子目录。
+- 词频与词云：按语言计算总词频、文档频率和语料占比，提供稳定排序、柱状图与 PNG 词云。
 
 ## 输入格式
 
@@ -46,7 +47,7 @@ collection, repository, volume, issue, page, notes, year, month, time_index
 
 ## 启动
 
-v2 默认界面为 React + Tauri：
+v2.1 默认界面为 React + Tauri：
 
 ```bat
 run.bat
@@ -60,7 +61,7 @@ npm install
 npm run tauri dev
 ```
 
-需要 Node.js、Rust、Python 3.11+；Python 依赖通过根目录 `requirements.txt` 安装。STM 另外需要 R、rpy2 和 R `stm` 包。
+源码开发需要 Node.js、Rust、Python 3.11+；Python 依赖通过根目录 `requirements.txt` 安装。Windows 安装包内置分析 sidecar，不要求用户安装 Python。STM 仍另外需要 R 和 R `stm` 包。
 
 旧 PySide6 v1 仅作为回退参考，不提供单表或双语能力：
 
@@ -75,6 +76,8 @@ documents.csv
 cleaned_documents.csv
 zh/
   tokens_corpus.txt
+  word_frequency.csv
+  word_cloud.png
   lda_topic_word.csv
   lda_doc_topic.csv
   lda_coherence.json
@@ -93,6 +96,10 @@ session_config.json
 cd desktop
 npm run build
 cargo check --manifest-path src-tauri\Cargo.toml
+npm run sidecar:build
+npm run release
 ```
 
-本版不直接读取 PDF、Word 或扫描图像，不提供 OCR 识别、自动语言识别、翻译或跨语言主题对齐。
+`npm run release` 先构建 PyInstaller sidecar，再生成 64 位 Windows NSIS 安装包。发布版核心功能不依赖源码目录或 `.venv`；STM 的 R 环境缺失不会影响其他分析。
+
+本版不直接读取 PDF、Word 或扫描图像，不提供 OCR 识别、自动语言识别、翻译、情感分析、NER 或跨语言主题对齐。

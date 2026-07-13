@@ -1,13 +1,13 @@
 import {
-  Activity, AlertTriangle, BarChart3, CheckCircle2, Circle, CircleCheck, Database, Download,
-  FileInput, FolderOpen, Layers3, Play, RefreshCw, Scissors, SplitSquareHorizontal, Table2
+  Activity, AlertTriangle, BarChart3, CheckCircle2, Circle, CircleCheck, Cloud, Database, Download,
+  FileInput, FolderOpen, ImageDown, Layers3, Play, RefreshCw, Scissors, SplitSquareHorizontal, Table2
 } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { routes } from "./routes";
 import {
   useWorkflowStore, type LanguageCode, type RouteKey, type TaskKey, type TaskResult,
-  type WorkflowSummary, type LdaParams, type StmParams
+  type WorkflowSummary, type FrequencyParams, type LdaParams, type StmParams
 } from "./state/workflowStore";
 
 const languageLabels: Record<LanguageCode, string> = { zh: "中文", en: "英文" };
@@ -16,6 +16,7 @@ const pageCopy: Record<RouteKey, { title: string; eyebrow: string; description: 
   welcome: { title: "历史文献主题分析工作台", eyebrow: "数字人文研究", description: "用一张文献表完成中英文历史文本的清洗、分语言建模、比较和导出。" },
   import: { title: "导入文献表", eyebrow: "v2 单表数据模型", description: "一行一篇文献；doc_id、text、language 为必填字段。" },
   clean: { title: "清洗与分词", eyebrow: "语言感知预处理", description: "中文使用 jieba，英文使用轻量规范化与拉丁词分词，原文始终保留。" },
+  frequency: { title: "词频分析与词云", eyebrow: "v2.1 双语宏观观察", description: "基于清洗后的 tokens 分别统计总词频和文档频率，并生成可复核词云。" },
   lda: { title: "LDA 主题建模", eyebrow: "按语言独立训练", description: "中文和英文使用独立词表与模型，结果不会相互覆盖。" },
   stm: { title: "STM 结构主题模型", eyebrow: "历史元数据协变量", description: "从来源、年份、文类及自定义字段中选择协变量。" },
   compare: { title: "对比分析", eyebrow: "动态历史维度", description: "只在同一语言模型内按来源、年份或自定义元数据聚合主题。" },
@@ -30,7 +31,7 @@ export function App() {
       <aside className="sidebar">
         <div className="brand-block">
           <div className="brand-mark" aria-label="历史文献主题分析工具 logo"><BarChart3 size={24} /></div>
-          <div><div className="brand-title">主题分析</div><div className="brand-subtitle">历史文献工作台 v2</div></div>
+          <div><div className="brand-title">主题分析</div><div className="brand-subtitle">历史文献工作台 v2.1</div></div>
         </div>
         <nav className="nav-list" aria-label="主导航">
           {routes.map(({ key, label, description, Icon }) => (
@@ -49,6 +50,7 @@ export function App() {
         <section className="status-grid" aria-label="流程状态">
           <StatusItem label="导入" active={state.workflow.imported} />
           <StatusItem label="清洗" active={state.workflow.cleaned} />
+          <StatusItem label="词频" active={state.workflow.frequencyDone} />
           <StatusItem label="LDA" active={state.workflow.ldaDone} />
           <StatusItem label="STM" active={state.workflow.stmDone} />
         </section>
@@ -87,6 +89,7 @@ function WorkflowPage({ route }: { route: Exclude<RouteKey, "welcome"> }) {
     <div className="page-stack">
       {route === "import" && <ImportPage />}
       {route === "clean" && <CleanPage />}
+      {route === "frequency" && <FrequencyPage />}
       {route === "lda" && <LdaPage />}
       {route === "stm" && <StmPage />}
       {route === "compare" && <ComparePage />}
@@ -200,6 +203,54 @@ function LanguageCleanPanel({ language }: { language: LanguageCode }) {
   );
 }
 
+function FrequencyPage() {
+  const store = useWorkflowStore();
+  const language = store.configs.frequencyLanguage;
+  const config = store.configs.frequency[language];
+  const result = store.results.frequency[language];
+  const rows = toRows(result?.rows);
+  const imageData = typeof result?.wordCloudPngBase64 === "string" ? result.wordCloudPngBase64 : "";
+  const update = (values: Partial<FrequencyParams>) => store.setModelConfig("frequency", language, values);
+  const saveCloud = async () => {
+    if (!imageData) return;
+    const path = await invoke<string | null>("select_chart_png_path", { defaultName: `${language}_word_cloud.png` });
+    if (path) await invoke("save_chart_png", { path, base64Data: imageData });
+  };
+  const maxValue = Math.max(1, ...rows.map((row) => Number(row[config.sortBy] ?? 0)));
+  return <>
+    <section className="control-panel">
+      <div className="panel-title"><Cloud size={18} />词频参数</div>
+      <LanguageSelect value={language} onChange={(value) => store.setModelLanguage("frequency", value)} />
+      <div className="parameter-form parameter-grid">
+        <SelectField label="排序指标" value={config.sortBy} options={[["term_frequency", "总词频"], ["document_frequency", "文档频率"]]} onChange={(sortBy) => update({ sortBy: sortBy as FrequencyParams["sortBy"] })} />
+        <NumberField label="Top N" value={config.topN} min={1} max={500} onChange={(topN) => update({ topN })} />
+        <NumberField label="最低总词频" value={config.minTermFrequency} min={1} max={1000000} onChange={(minTermFrequency) => update({ minTermFrequency })} />
+        <NumberField label="最低文档频率" value={config.minDocumentFrequency} min={1} max={1000000} onChange={(minDocumentFrequency) => update({ minDocumentFrequency })} />
+      </div>
+      <p className="field-note">词云始终按总词频设置大小；相同语料和参数使用固定随机种子生成稳定结果。</p>
+      <button className="primary-button" type="button" disabled={!store.workflow.cleaned || store.tasks.frequency.status === "running" || store.summary.totalTokens[language] === 0} onClick={() => store.runBackendTask("frequency")}><Play size={17} />分析{languageLabels[language]}词频</button>
+    </section>
+    <section className="metric-grid">
+      <Metric label="分析文献" value={Number(result?.documents ?? 0) || "待分析"} />
+      <Metric label="词元总数" value={Number(result?.totalTokens ?? 0)} />
+      <Metric label="唯一词数" value={Number(result?.uniqueWords ?? 0)} />
+      <Metric label="阈值后词数" value={Number(result?.filteredWords ?? 0)} />
+    </section>
+    <section className="result-section">
+      <div className="result-heading"><BarChart3 size={19} /><span>高频词柱状图</span></div>
+      {!rows.length ? <Empty text="完成分析后显示高频词。" /> : <div className="frequency-bars">{rows.slice(0, 30).map((row) => {
+        const value = Number(row[config.sortBy] ?? 0);
+        return <div className="frequency-bar" key={String(row.word)}><span>{String(row.word)}</span><div><i style={{ width: `${Math.max(2, value / maxValue * 100)}%` }} /></div><strong>{value}</strong></div>;
+      })}</div>}
+      <ResultTable columns={["rank", "word", "term_frequency", "document_frequency", "document_frequency_ratio", "token_share"]} rows={rows} />
+    </section>
+    <section className="result-section">
+      <div className="result-heading"><Cloud size={19} /><span>词云</span>{imageData && <button className="ghost-button" type="button" onClick={saveCloud}><ImageDown size={15} />保存 PNG</button>}</div>
+      {imageData ? <img className="word-cloud-image" src={`data:image/png;base64,${imageData}`} alt={`${languageLabels[language]}词云`} /> : <Empty text="完成分析后显示词云。" />}
+    </section>
+  </>;
+}
+
 function LdaPage() {
   const store = useWorkflowStore();
   const language = store.configs.ldaLanguage;
@@ -271,6 +322,7 @@ function ExportPage() {
   const update = (values: Partial<typeof config>) => store.setTaskConfig("export", values);
   const items = [
     ["documents", "标准化文献表"], ["cleaned_documents", "清洗后文献"], ["tokens_corpus", "分语言语料"],
+    ["word_frequency", "词频明细"], ["word_cloud", "词云 PNG"],
     ["lda_topic_word", "LDA 主题词"], ["lda_doc_topic", "LDA 文献主题"], ["lda_coherence", "LDA 一致性"],
     ["stm_topic_word", "STM 主题词"], ["stm_doc_topic", "STM 文献主题"], ["stm_prevalence", "STM prevalence"],
     ["session_config", "v2 会话配置"]
@@ -389,10 +441,10 @@ function ResultTable({ columns, rows, emptyText = "暂无数据" }: { columns: s
   return <div className="table-scroll"><table className="result-table"><thead><tr>{visible.map((column) => <th key={column}>{column}</th>)}</tr></thead><tbody>{rows.slice(0, 200).map((row, index) => <tr key={String(row.doc_id ?? index)}>{visible.map((column) => <td key={column}>{formatCell(row[column])}</td>)}</tr>)}</tbody></table></div>;
 }
 
-function canRun(route: Exclude<RouteKey, "welcome">, workflow: { imported: boolean; cleaned: boolean; ldaDone: boolean; stmDone: boolean }) {
+function canRun(route: Exclude<RouteKey, "welcome">, workflow: { imported: boolean; cleaned: boolean; frequencyDone: boolean; ldaDone: boolean; stmDone: boolean }) {
   if (route === "import") return true;
   if (route === "clean") return workflow.imported;
-  if (route === "lda" || route === "stm") return workflow.cleaned;
+  if (route === "frequency" || route === "lda" || route === "stm") return workflow.cleaned;
   if (route === "compare") return workflow.ldaDone || workflow.stmDone;
   return workflow.imported;
 }

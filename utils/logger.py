@@ -5,12 +5,24 @@
 import logging
 import os
 from datetime import datetime
-from PySide6.QtCore import QObject, Signal
+try:
+    from PySide6.QtCore import QObject, Signal
 
+    class LogSignals(QObject):
+        """日志信号，用于将日志消息传递给 GUI。"""
+        message = Signal(str, str)   # (level, message)
+except ImportError:
+    class _NullSignal:
+        def emit(self, *_args):
+            return None
 
-class LogSignals(QObject):
-    """日志信号，用于将日志消息传递给 GUI"""
-    message = Signal(str, str)   # (level, message)
+        def connect(self, *_args):
+            return None
+
+    class LogSignals:
+        """Headless bridge replacement when PySide6 is not bundled."""
+        def __init__(self):
+            self.message = _NullSignal()
 
 
 # 全局信号实例

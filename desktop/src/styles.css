@@ -195,7 +195,7 @@ h1 {
 
 .status-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(96px, 1fr));
+  grid-template-columns: repeat(5, minmax(96px, 1fr));
   gap: 10px;
 }
 
@@ -212,7 +212,7 @@ h1 {
   font-weight: 700;
 }
 
-.status-item.done {
+.status-item.active {
   border-color: #8cc2a3;
   color: #24724a;
   background: #eff8f2;
@@ -797,6 +797,60 @@ h1 {
   border-radius: 8px;
   color: #7b8797;
   text-align: center;
+}
+
+.frequency-bars {
+  display: grid;
+  gap: 8px;
+  margin: 18px 0;
+  max-height: 520px;
+  overflow: auto;
+}
+
+.frequency-bar {
+  display: grid;
+  grid-template-columns: minmax(90px, 160px) minmax(120px, 1fr) 64px;
+  align-items: center;
+  gap: 10px;
+  color: #465366;
+  font-size: 13px;
+}
+
+.frequency-bar > span {
+  overflow: hidden;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.frequency-bar > div {
+  height: 14px;
+  overflow: hidden;
+  border-radius: 7px;
+  background: #edf1f5;
+}
+
+.frequency-bar i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #24724a, #55a775);
+}
+
+.frequency-bar strong {
+  color: #24724a;
+  text-align: right;
+}
+
+.word-cloud-image {
+  display: block;
+  width: 100%;
+  max-height: 620px;
+  margin-top: 18px;
+  object-fit: contain;
+  border: 1px solid #e3e8ef;
+  border-radius: 8px;
+  background: #ffffff;
 }
 
 .article-selector {

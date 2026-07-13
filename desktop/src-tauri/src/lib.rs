@@ -2,10 +2,14 @@ use base64::Engine;
 use serde::Serialize;
 use serde_json::Value;
 use std::fs;
+#[cfg(debug_assertions)]
 use std::path::PathBuf;
+#[cfg(debug_assertions)]
 use std::process::Command;
 use std::sync::Mutex;
 use tauri::State;
+#[cfg(not(debug_assertions))]
+use tauri_plugin_shell::ShellExt;
 
 #[derive(Default)]
 struct WorkflowSession(Mutex<Value>);
@@ -53,11 +57,11 @@ fn select_stopwords_file() -> Result<Option<SelectedTextFile>, String> {
 }
 
 #[tauri::command]
-fn select_chart_png_path() -> Option<String> {
+fn select_chart_png_path(default_name: Option<String>) -> Option<String> {
     rfd::FileDialog::new()
         .set_title("保存当前图表")
         .add_filter("PNG 图片", &["png"])
-        .set_file_name("topic_chart.png")
+        .set_file_name(default_name.as_deref().unwrap_or("topic_chart.png"))
         .save_file()
         .map(|mut path| {
             if path.extension().and_then(|extension| extension.to_str()) != Some("png") {
@@ -95,7 +99,8 @@ fn merge_payload(base: &mut Value, update: &Value) {
 }
 
 #[tauri::command]
-fn run_python_task(
+async fn run_python_task(
+    _app: tauri::AppHandle,
     task: String,
     payload: Value,
     session: State<'_, WorkflowSession>,
@@ -103,6 +108,7 @@ fn run_python_task(
     let command = match task.as_str() {
         "import" => "task.import",
         "clean" => "task.clean",
+        "frequency" => "task.frequency",
         "lda" => "task.lda",
         "lda-vis" => "lda.open_pyldavis",
         "stm" => "task.stm",
@@ -124,7 +130,10 @@ fn run_python_task(
         }
     };
     merge_payload(&mut session_payload, &payload);
+    let payload_json = session_payload.to_string();
 
+    #[cfg(debug_assertions)]
+    let output = {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let project_root = manifest_dir
         .parent()
@@ -150,10 +159,23 @@ fn run_python_task(
         .arg("-m")
         .arg("backend.bridge")
         .arg(command)
-        .arg(session_payload.to_string());
-    let output = python_command
+        .arg(&payload_json);
+    python_command
         .output()
-        .map_err(|err| format!("启动 Python bridge 失败：{}", err))?;
+        .map_err(|err| format!("启动 Python bridge 失败：{}", err))?
+    };
+
+    #[cfg(not(debug_assertions))]
+    let output = _app
+        .shell()
+        .sidecar("topic-analyzer-backend")
+        .map_err(|err| format!("定位 Python sidecar 失败：{}", err))?
+        .args([command, payload_json.as_str()])
+        .env("PYTHONUTF8", "1")
+        .env("PYTHONIOENCODING", "utf-8")
+        .output()
+        .await
+        .map_err(|err| format!("启动 Python sidecar 失败：{}", err))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
