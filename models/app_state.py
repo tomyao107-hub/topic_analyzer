@@ -38,6 +38,9 @@ class AppState:
     # ── 情感分析（按语言隔离）────────────────────────
     sentiment_results: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
+    # ── 命名实体识别（按语言隔离）────────────────────
+    ner_results: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+
     # ── 按语言保存模型结果 ────────────────────────────
     lda_results: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     lda_model: Any = None
@@ -66,11 +69,13 @@ class AppState:
     step_cleaned: bool = False
     step_frequency_done: bool = False
     step_sentiment_done: bool = False
+    step_ner_done: bool = False
     step_lda_done: bool = False
     step_stm_done: bool = False
     cleaned_languages: set = field(default_factory=set)
     frequency_done_languages: set = field(default_factory=set)
     sentiment_done_languages: set = field(default_factory=set)
+    ner_done_languages: set = field(default_factory=set)
     lda_done_languages: set = field(default_factory=set)
     stm_done_languages: set = field(default_factory=set)
 

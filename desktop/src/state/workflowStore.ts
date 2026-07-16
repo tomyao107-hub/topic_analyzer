@@ -2,7 +2,7 @@ import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 
 export type LanguageCode = "zh" | "en";
-export type RouteKey = "welcome" | "import" | "clean" | "frequency" | "sentiment" | "lda" | "stm" | "compare" | "export";
+export type RouteKey = "welcome" | "import" | "clean" | "frequency" | "sentiment" | "ner" | "lda" | "stm" | "compare" | "export";
 export type TaskKey = Exclude<RouteKey, "welcome">;
 export type TaskStatus = "idle" | "running" | "succeeded" | "failed";
 export type TaskResult = Record<string, unknown> | null;
@@ -12,11 +12,12 @@ export type WorkflowFlags = {
   cleaned: boolean;
   frequencyDone: boolean;
   sentimentDone: boolean;
+  nerDone: boolean;
   ldaDone: boolean;
   stmDone: boolean;
 };
 
-export type LanguageWorkflow = Record<LanguageCode, { cleaned: boolean; frequencyDone: boolean; sentimentDone: boolean; ldaDone: boolean; stmDone: boolean }>;
+export type LanguageWorkflow = Record<LanguageCode, { cleaned: boolean; frequencyDone: boolean; sentimentDone: boolean; nerDone: boolean; ldaDone: boolean; stmDone: boolean }>;
 
 export type WorkflowSummary = {
   documentRows: number;
@@ -26,6 +27,7 @@ export type WorkflowSummary = {
   uniqueWords: Record<LanguageCode, number>;
   frequencyWords: Record<LanguageCode, number>;
   sentimentDocuments: Record<LanguageCode, number>;
+  nerEntities: Record<LanguageCode, number>;
   ldaTopics: Record<LanguageCode, number>;
   ldaCoherence: Record<LanguageCode, number | null>;
   stmTopics: Record<LanguageCode, number>;
@@ -103,6 +105,20 @@ export type SentimentParams = {
   negativeText: string;
 };
 
+export type EntityType = "person" | "location" | "organization" | "office" | "time";
+
+export type NerParams = {
+  entityTypes: EntityType[];
+  minMentionCount: number;
+  contextWindow: number;
+  useModel: boolean;
+  personText: string;
+  locationText: string;
+  organizationText: string;
+  officeText: string;
+  timeText: string;
+};
+
 export type StmParams = {
   numTopics: number;
   prevalenceFormula: string;
@@ -135,6 +151,8 @@ export type WorkflowConfigs = {
   frequency: Record<LanguageCode, FrequencyParams>;
   sentimentLanguage: LanguageCode;
   sentiment: Record<LanguageCode, SentimentParams>;
+  nerLanguage: LanguageCode;
+  ner: Record<LanguageCode, NerParams>;
   ldaLanguage: LanguageCode;
   lda: Record<LanguageCode, LdaParams>;
   stmLanguage: LanguageCode;
@@ -150,6 +168,7 @@ export type WorkflowResults = {
   clean: TaskResult;
   frequency: LanguageResults;
   sentiment: LanguageResults;
+  ner: LanguageResults;
   lda: LanguageResults;
   stm: LanguageResults;
   compare: LanguageResults;
@@ -193,8 +212,8 @@ type WorkflowState = {
   setActiveRoute: (route: RouteKey) => void;
   setImportConfig: (values: Partial<ImportConfig>) => void;
   setTaskConfig: <K extends ConfigTaskKey>(task: K, values: Partial<WorkflowConfigs[K]>) => void;
-  setModelLanguage: (model: "frequency" | "sentiment" | "lda" | "stm", language: LanguageCode) => void;
-  setModelConfig: (model: "frequency" | "sentiment" | "lda" | "stm", language: LanguageCode, values: Partial<FrequencyParams & SentimentParams & LdaParams & StmParams>) => void;
+  setModelLanguage: (model: "frequency" | "sentiment" | "ner" | "lda" | "stm", language: LanguageCode) => void;
+  setModelConfig: (model: "frequency" | "sentiment" | "ner" | "lda" | "stm", language: LanguageCode, values: Partial<FrequencyParams & SentimentParams & NerParams & LdaParams & StmParams>) => void;
   setLanguageCleanConfig: (language: LanguageCode, values: Partial<LanguageCleanConfig>) => void;
   chooseImportFile: () => Promise<void>;
   chooseConfigPath: (target: "customDict" | "stopwords" | "outputDir", language?: LanguageCode) => Promise<void>;
@@ -206,11 +225,11 @@ type WorkflowState = {
 const now = () => new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 const languages: LanguageCode[] = ["zh", "en"];
 const labels: Record<TaskKey, string> = {
-  import: "导入文献", clean: "双语清洗", frequency: "词频与词云", sentiment: "情感分析", lda: "LDA 训练", stm: "STM 训练", compare: "对比分析", export: "导出结果"
+  import: "导入文献", clean: "双语清洗", frequency: "词频与词云", sentiment: "情感分析", ner: "实体识别", lda: "LDA 训练", stm: "STM 训练", compare: "对比分析", export: "导出结果"
 };
 const phases: Record<TaskKey, string> = {
   import: "字段识别与严格校验", clean: "语言感知清洗与分词", lda: "分语言 LDA 训练",
-  frequency: "分语言词频统计与词云", sentiment: "分语言情感评分与聚合", stm: "分语言 STM 训练", compare: "历史元数据聚合", export: "按语言重建并写入结果"
+  frequency: "分语言词频统计与词云", sentiment: "分语言情感评分与聚合", ner: "分语言实体抽取与聚合", stm: "分语言 STM 训练", compare: "历史元数据聚合", export: "按语言重建并写入结果"
 };
 
 const createTask = (key: TaskKey): TaskState => ({
@@ -219,15 +238,16 @@ const createTask = (key: TaskKey): TaskState => ({
 });
 const createTasks = () => Object.fromEntries((Object.keys(labels) as TaskKey[]).map((key) => [key, createTask(key)])) as Record<TaskKey, TaskState>;
 const emptyLanguageResults = (): LanguageResults => ({ zh: null, en: null });
-const createResults = (): WorkflowResults => ({ import: null, clean: null, frequency: emptyLanguageResults(), sentiment: emptyLanguageResults(), lda: emptyLanguageResults(), stm: emptyLanguageResults(), compare: emptyLanguageResults(), export: null });
+const createResults = (): WorkflowResults => ({ import: null, clean: null, frequency: emptyLanguageResults(), sentiment: emptyLanguageResults(), ner: emptyLanguageResults(), lda: emptyLanguageResults(), stm: emptyLanguageResults(), compare: emptyLanguageResults(), export: null });
 const emptyLanguageWorkflow = (): LanguageWorkflow => ({
-  zh: { cleaned: false, frequencyDone: false, sentimentDone: false, ldaDone: false, stmDone: false },
-  en: { cleaned: false, frequencyDone: false, sentimentDone: false, ldaDone: false, stmDone: false }
+  zh: { cleaned: false, frequencyDone: false, sentimentDone: false, nerDone: false, ldaDone: false, stmDone: false },
+  en: { cleaned: false, frequencyDone: false, sentimentDone: false, nerDone: false, ldaDone: false, stmDone: false }
 });
 const emptySummary = (): WorkflowSummary => ({
   documentRows: 0, languageRows: { zh: 0, en: 0 }, cleanDocuments: 0,
   totalTokens: { zh: 0, en: 0 }, uniqueWords: { zh: 0, en: 0 },
   frequencyWords: { zh: 0, en: 0 }, sentimentDocuments: { zh: 0, en: 0 },
+  nerEntities: { zh: 0, en: 0 },
   ldaTopics: { zh: 0, en: 0 }, ldaCoherence: { zh: null, en: null },
   stmTopics: { zh: 0, en: 0 }, exportFiles: 0
 });
@@ -235,6 +255,7 @@ const emptySummary = (): WorkflowSummary => ({
 const defaultLda = (): LdaParams => ({ numTopics: 10, passes: 20, iterations: 400, randomState: 42, minDocFreq: 2, maxDocFreqRatio: 0.95, genre: "__all__" });
 const defaultFrequency = (): FrequencyParams => ({ sortBy: "term_frequency", topN: 50, minTermFrequency: 1, minDocumentFrequency: 1, randomState: 42 });
 const defaultSentiment = (): SentimentParams => ({ positiveThreshold: 0.05, negativeThreshold: -0.05, useNegation: true, useDegree: true, topEvidence: 8, groupBy: "", positiveText: "", negativeText: "" });
+const defaultNer = (): NerParams => ({ entityTypes: ["person", "location", "organization", "office", "time"], minMentionCount: 1, contextWindow: 20, useModel: true, personText: "", locationText: "", organizationText: "", officeText: "", timeText: "" });
 const defaultStm = (): StmParams => ({ numTopics: 10, prevalenceFormula: "~ 1", contentCovariate: "", maxEmIterations: 75, randomState: 42, genre: "__all__" });
 const parseStopwords = (text: string) => [...new Set(text.split(/\r?\n/).map((word) => word.trim()).filter(Boolean))];
 
@@ -248,6 +269,21 @@ const sentimentPayload = (config: Record<LanguageCode, SentimentParams>) => {
     groupBy: params.groupBy,
     positiveWords: parseStopwords(params.positiveText),
     negativeWords: parseStopwords(params.negativeText)
+  });
+  return { zh: build(config.zh), en: build(config.en) };
+};
+
+const nerPayload = (config: Record<LanguageCode, NerParams>) => {
+  const build = (params: NerParams) => ({
+    entityTypes: params.entityTypes,
+    minMentionCount: params.minMentionCount,
+    contextWindow: params.contextWindow,
+    useModel: params.useModel,
+    personWords: parseStopwords(params.personText),
+    locationWords: parseStopwords(params.locationText),
+    organizationWords: parseStopwords(params.organizationText),
+    officeWords: parseStopwords(params.officeText),
+    timeWords: parseStopwords(params.timeText)
   });
   return { zh: build(config.zh), en: build(config.en) };
 };
@@ -280,12 +316,14 @@ const backendPayload = (task: TaskKey, state: WorkflowState) => {
     ...cleanPayload(state.configs.clean),
     frequencyConfigs: state.configs.frequency,
     sentimentConfigs: sentimentPayload(state.configs.sentiment),
+    nerConfigs: nerPayload(state.configs.ner),
     ldaConfigs: state.configs.lda,
     stmConfigs: state.configs.stm
   };
   if (task === "clean") return common;
   if (task === "frequency") return { ...common, language: state.configs.frequencyLanguage };
   if (task === "sentiment") return { ...common, language: state.configs.sentimentLanguage };
+  if (task === "ner") return { ...common, language: state.configs.nerLanguage };
   if (task === "lda") return { ...common, language: state.configs.ldaLanguage };
   if (task === "stm") return { ...common, language: state.configs.stmLanguage };
   if (task === "compare") return { ...common, ...state.configs.compare };
@@ -309,6 +347,10 @@ const taskSummary = (task: TaskKey, state: WorkflowState, data: Record<string, u
     const dist = summary.distribution ?? {};
     return `${data.language === "en" ? "英文" : "中文"}情感分析完成：正面 ${dist.positive ?? 0} / 中性 ${dist.neutral ?? 0} / 负面 ${dist.negative ?? 0}`;
   }
+  if (task === "ner") {
+    const summary = (data.summary ?? {}) as { entities?: number; mentions?: number };
+    return `${data.language === "en" ? "英文" : "中文"}实体识别完成：${summary.entities ?? 0} 个实体 / ${summary.mentions ?? 0} 次出现`;
+  }
   if (task === "export") return `已写入 ${String(data.count ?? state.summary.exportFiles)} 个文件`;
   const fallbackLanguage = task === "lda" ? state.configs.ldaLanguage : task === "stm" ? state.configs.stmLanguage : state.configs.compare.language;
   const language = String(data.language ?? fallbackLanguage);
@@ -319,7 +361,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
   activeRoute: "welcome",
   projectName: "未命名项目",
   outputDir: "",
-  workflow: { imported: false, cleaned: false, frequencyDone: false, sentimentDone: false, ldaDone: false, stmDone: false },
+  workflow: { imported: false, cleaned: false, frequencyDone: false, sentimentDone: false, nerDone: false, ldaDone: false, stmDone: false },
   languageWorkflow: emptyLanguageWorkflow(),
   summary: emptySummary(),
   importConfig: { dataPath: "", fieldMapping: { doc_id: "doc_id", text: "text", language: "language" } },
@@ -332,12 +374,13 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
     },
     frequencyLanguage: "zh", frequency: { zh: defaultFrequency(), en: defaultFrequency() },
     sentimentLanguage: "zh", sentiment: { zh: defaultSentiment(), en: defaultSentiment() },
+    nerLanguage: "zh", ner: { zh: defaultNer(), en: defaultNer() },
     ldaLanguage: "zh", lda: { zh: defaultLda(), en: defaultLda() },
     stmLanguage: "zh", stm: { zh: defaultStm(), en: defaultStm() },
     compare: { language: "zh", model: "lda", axisField: "source_name", metricField: "__all__", filters: {}, representativeLimit: 3, chartType: "bar" },
     export: {
       projectName: "未命名项目", outputDir: "", languages: ["zh", "en"],
-      items: ["documents", "cleaned_documents", "tokens_corpus", "word_frequency", "word_cloud", "sentiment_documents", "sentiment_summary", "lda_topic_word", "lda_doc_topic", "lda_coherence", "stm_topic_word", "stm_doc_topic", "stm_prevalence", "session_config"]
+      items: ["documents", "cleaned_documents", "tokens_corpus", "word_frequency", "word_cloud", "sentiment_documents", "sentiment_summary", "entities", "entity_mentions", "lda_topic_word", "lda_doc_topic", "lda_coherence", "stm_topic_word", "stm_doc_topic", "stm_prevalence", "session_config"]
     }
   },
   tasks: createTasks(),
@@ -376,12 +419,12 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
     set((state) => ({
       logs: appendLogs(state.logs, [`[${now()}] ${labels[task]}：开始`]),
       tasks: { ...state.tasks, [task]: { ...state.tasks[task], status: "running", phase: phases[task], message: "处理中…", progress: null, error: "", updatedAt: now() } },
-      ...(task === "import" ? { results: createResults(), workflow: { imported: false, cleaned: false, frequencyDone: false, sentimentDone: false, ldaDone: false, stmDone: false }, languageWorkflow: emptyLanguageWorkflow(), summary: emptySummary() } : {}),
+      ...(task === "import" ? { results: createResults(), workflow: { imported: false, cleaned: false, frequencyDone: false, sentimentDone: false, nerDone: false, ldaDone: false, stmDone: false }, languageWorkflow: emptyLanguageWorkflow(), summary: emptySummary() } : {}),
       ...(task === "clean" ? {
-        results: { ...state.results, clean: null, frequency: emptyLanguageResults(), sentiment: emptyLanguageResults(), lda: emptyLanguageResults(), stm: emptyLanguageResults(), compare: emptyLanguageResults(), export: null },
-        workflow: { ...state.workflow, cleaned: false, frequencyDone: false, sentimentDone: false, ldaDone: false, stmDone: false },
+        results: { ...state.results, clean: null, frequency: emptyLanguageResults(), sentiment: emptyLanguageResults(), ner: emptyLanguageResults(), lda: emptyLanguageResults(), stm: emptyLanguageResults(), compare: emptyLanguageResults(), export: null },
+        workflow: { ...state.workflow, cleaned: false, frequencyDone: false, sentimentDone: false, nerDone: false, ldaDone: false, stmDone: false },
         languageWorkflow: emptyLanguageWorkflow(),
-        summary: { ...state.summary, cleanDocuments: 0, totalTokens: { zh: 0, en: 0 }, uniqueWords: { zh: 0, en: 0 }, frequencyWords: { zh: 0, en: 0 }, sentimentDocuments: { zh: 0, en: 0 }, ldaTopics: { zh: 0, en: 0 }, ldaCoherence: { zh: null, en: null }, stmTopics: { zh: 0, en: 0 }, exportFiles: 0 }
+        summary: { ...state.summary, cleanDocuments: 0, totalTokens: { zh: 0, en: 0 }, uniqueWords: { zh: 0, en: 0 }, frequencyWords: { zh: 0, en: 0 }, sentimentDocuments: { zh: 0, en: 0 }, nerEntities: { zh: 0, en: 0 }, ldaTopics: { zh: 0, en: 0 }, ldaCoherence: { zh: null, en: null }, stmTopics: { zh: 0, en: 0 }, exportFiles: 0 }
       } : {})
     }));
     try {
@@ -396,6 +439,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
         const incomingSummary = response.state?.summary;
         const incomingFrequencyWords: Partial<Record<LanguageCode, number>> = incomingSummary?.frequencyWords ?? {};
         const incomingSentimentDocuments: Partial<Record<LanguageCode, number>> = incomingSummary?.sentimentDocuments ?? {};
+        const incomingNerEntities: Partial<Record<LanguageCode, number>> = incomingSummary?.nerEntities ?? {};
         const incomingLdaTopics: Partial<Record<LanguageCode, number>> = incomingSummary?.ldaTopics ?? {};
         const incomingLdaCoherence: Partial<Record<LanguageCode, number | null>> = incomingSummary?.ldaCoherence ?? {};
         const incomingStmTopics: Partial<Record<LanguageCode, number>> = incomingSummary?.stmTopics ?? {};
@@ -412,6 +456,10 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
           sentimentDocuments: {
             zh: Number(incomingSentimentDocuments.zh ?? 0) > 0 ? Number(incomingSentimentDocuments.zh) : current.summary.sentimentDocuments.zh,
             en: Number(incomingSentimentDocuments.en ?? 0) > 0 ? Number(incomingSentimentDocuments.en) : current.summary.sentimentDocuments.en
+          },
+          nerEntities: {
+            zh: Number(incomingNerEntities.zh ?? 0) > 0 ? Number(incomingNerEntities.zh) : current.summary.nerEntities.zh,
+            en: Number(incomingNerEntities.en ?? 0) > 0 ? Number(incomingNerEntities.en) : current.summary.nerEntities.en
           },
           ldaTopics: {
             zh: Number(incomingLdaTopics.zh ?? 0) > 0 ? Number(incomingLdaTopics.zh) : current.summary.ldaTopics.zh,
@@ -433,6 +481,7 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
             cleaned: languageWorkflow[language].cleaned || incoming?.cleaned === true,
             frequencyDone: languageWorkflow[language].frequencyDone || incoming?.frequencyDone === true,
             sentimentDone: languageWorkflow[language].sentimentDone || incoming?.sentimentDone === true,
+            nerDone: languageWorkflow[language].nerDone || incoming?.nerDone === true,
             ldaDone: languageWorkflow[language].ldaDone || incoming?.ldaDone === true,
             stmDone: languageWorkflow[language].stmDone || incoming?.stmDone === true
           };
@@ -442,12 +491,13 @@ export const useWorkflowStore = create<WorkflowState>((set, get) => ({
           cleaned: current.workflow.cleaned || response.state?.workflow?.cleaned === true,
           frequencyDone: current.workflow.frequencyDone || response.state?.workflow?.frequencyDone === true,
           sentimentDone: current.workflow.sentimentDone || response.state?.workflow?.sentimentDone === true,
+          nerDone: current.workflow.nerDone || response.state?.workflow?.nerDone === true,
           ldaDone: current.workflow.ldaDone || response.state?.workflow?.ldaDone === true,
           stmDone: current.workflow.stmDone || response.state?.workflow?.stmDone === true
         };
         const results = { ...current.results };
-        if (task === "frequency" || task === "sentiment" || task === "lda" || task === "stm" || task === "compare") {
-          const fallbackLanguage = task === "frequency" ? current.configs.frequencyLanguage : task === "sentiment" ? current.configs.sentimentLanguage : task === "lda" ? current.configs.ldaLanguage : task === "stm" ? current.configs.stmLanguage : current.configs.compare.language;
+        if (task === "frequency" || task === "sentiment" || task === "ner" || task === "lda" || task === "stm" || task === "compare") {
+          const fallbackLanguage = task === "frequency" ? current.configs.frequencyLanguage : task === "sentiment" ? current.configs.sentimentLanguage : task === "ner" ? current.configs.nerLanguage : task === "lda" ? current.configs.ldaLanguage : task === "stm" ? current.configs.stmLanguage : current.configs.compare.language;
           const language: LanguageCode = data.language === "en" ? "en" : data.language === "zh" ? "zh" : fallbackLanguage;
           results[task] = { ...results[task], [language]: data } as never;
         } else {

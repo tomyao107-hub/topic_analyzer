@@ -13,6 +13,8 @@ EXPORT_ITEMS = (
     ("word_cloud", "word_cloud.png", "词云 PNG", "frequency_results"),
     ("sentiment_documents", "sentiment_documents.csv", "情感文献明细", "sentiment_results"),
     ("sentiment_summary", "sentiment_summary.csv", "情感聚合摘要", "sentiment_results"),
+    ("entities", "entities.csv", "实体聚合表", "ner_results"),
+    ("entity_mentions", "entity_mentions.csv", "实体出现明细", "ner_results"),
     ("lda_topic_word", "lda_topic_word.csv", "LDA 主题词", "lda_topics"),
     ("lda_doc_topic", "lda_doc_topic.csv", "LDA 文档主题分布", "lda_doc_topics"),
     ("lda_coherence", "lda_coherence.json", "LDA 一致性指标", "lda_coherence"),
@@ -101,4 +103,34 @@ def write_sentiment_outputs(
             os.path.join(language_dir, "sentiment_summary.csv"), index=False, encoding="utf-8-sig"
         )
         exported.append(f"{language}/sentiment_summary.csv")
+    return exported
+
+
+def write_ner_outputs(
+    language_dir: str,
+    entities: List[Dict[str, Any]],
+    mentions: List[Dict[str, Any]],
+    selected: set,
+) -> List[str]:
+    """Write v2.3 NER artifacts (aggregated entities and per-mention rows with positions)."""
+    exported: List[str] = []
+    language = os.path.basename(os.path.normpath(language_dir))
+    if "entities" in selected:
+        columns = [
+            "rank", "entity", "entity_type", "entity_type_label",
+            "mention_count", "document_count", "sources",
+        ]
+        pd.DataFrame(entities, columns=columns).to_csv(
+            os.path.join(language_dir, "entities.csv"), index=False, encoding="utf-8-sig"
+        )
+        exported.append(f"{language}/entities.csv")
+    if "entity_mentions" in selected:
+        columns = [
+            "doc_id", "entity", "entity_type", "entity_type_label",
+            "start", "end", "source", "context",
+        ]
+        pd.DataFrame(mentions, columns=columns).to_csv(
+            os.path.join(language_dir, "entity_mentions.csv"), index=False, encoding="utf-8-sig"
+        )
+        exported.append(f"{language}/entity_mentions.csv")
     return exported

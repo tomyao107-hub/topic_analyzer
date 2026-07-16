@@ -2,7 +2,7 @@
 from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs
 
 datas, binaries, hiddenimports = [], [], []
-for package in ("wordcloud", "pyLDAvis"):
+for package in ("wordcloud", "pyLDAvis", "jieba"):
     datas += collect_data_files(package)
     binaries += collect_dynamic_libs(package)
 
@@ -19,6 +19,7 @@ datas += [
 # works when the user has installed R and the R package stm.
 hiddenimports += [
     "gensim.models.ldamodel", "gensim.models.coherencemodel", "pyLDAvis.gensim_models",
+    "jieba", "jieba.posseg",
     "rpy2.robjects", "rpy2.robjects.packages", "rpy2.rinterface_lib.openrlib",
 ]
 

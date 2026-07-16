@@ -18,7 +18,8 @@ from services.compare_service import build_compare_summary, representative_artic
 from services.data_service import DocumentValidationError, load_documents
 from services.frequency_service import FrequencyOptions, analyze_word_frequency, render_word_cloud_png
 from services.sentiment_service import SentimentOptions, analyze_sentiment
-from services.export_service import write_frequency_outputs, write_sentiment_outputs
+from services.ner_service import NEROptions, analyze_ner
+from services.export_service import write_frequency_outputs, write_sentiment_outputs, write_ner_outputs
 from services.lda_service import build_corpus, compute_coherence, get_doc_topics, get_topics, open_pyldavis, train_lda
 from services.stm_service import _analyze_stm_column, check_r_environment, train_stm
 
@@ -95,6 +96,7 @@ def _state_snapshot() -> Dict[str, Any]:
             "cleaned": state.step_cleaned,
             "frequencyDone": bool(state.frequency_done_languages),
             "sentimentDone": bool(state.sentiment_done_languages),
+            "nerDone": bool(state.ner_done_languages),
             "ldaDone": bool(state.lda_done_languages),
             "stmDone": bool(state.stm_done_languages),
         },
@@ -103,6 +105,7 @@ def _state_snapshot() -> Dict[str, Any]:
                 "cleaned": language in state.cleaned_languages,
                 "frequencyDone": language in state.frequency_done_languages,
                 "sentimentDone": language in state.sentiment_done_languages,
+                "nerDone": language in state.ner_done_languages,
                 "ldaDone": language in state.lda_done_languages,
                 "stmDone": language in state.stm_done_languages,
             }
@@ -126,6 +129,10 @@ def _state_snapshot() -> Dict[str, Any]:
             },
             "sentimentDocuments": {
                 language: len(state.sentiment_results.get(language, {}).get("rows") or [])
+                for language in LANGUAGES
+            },
+            "nerEntities": {
+                language: len(state.ner_results.get(language, {}).get("entities") or [])
                 for language in LANGUAGES
             },
             "ldaTopics": lda_topics,
@@ -419,6 +426,62 @@ def _run_sentiment(payload: Dict[str, Any]) -> Dict[str, Any]:
     return response
 
 
+def _ner_options(payload: Dict[str, Any], language: str) -> NEROptions:
+    configs = payload.get("nerConfigs") or {}
+    values = configs.get(language) or payload.get("nerConfig") or payload
+    from services.ner_service import ENTITY_TYPES
+    requested = values.get("entityTypes")
+    if requested:
+        entity_types = tuple(str(item).strip() for item in requested if str(item).strip() in ENTITY_TYPES)
+    else:
+        entity_types = ENTITY_TYPES
+    if not entity_types:
+        entity_types = ENTITY_TYPES
+
+    def _words(key: str):
+        return tuple(str(word).strip() for word in (values.get(key) or []) if str(word).strip())
+
+    return NEROptions(
+        language=language,
+        entity_types=entity_types,
+        min_mention_count=int(values.get("minMentionCount", 1)),
+        context_window=int(values.get("contextWindow", 20)),
+        use_model=bool(values.get("useModel", True)),
+        person_words=_words("personWords"),
+        location_words=_words("locationWords"),
+        organization_words=_words("organizationWords"),
+        office_words=_words("officeWords"),
+        time_words=_words("timeWords"),
+    )
+
+
+def _run_ner(payload: Dict[str, Any]) -> Dict[str, Any]:
+    state = get_state()
+    _ensure_clean(payload)
+    language = _selected_language(payload)
+    options = _ner_options(payload, language)
+    indices = [
+        index for index, value in enumerate(state.cleaned_df["language"].tolist())
+        if value == language
+    ]
+    # 实体识别使用保留的原始 text，字符位置与上下文因此可回溯到原文。
+    texts = [str(state.cleaned_df["text"].tolist()[index]) for index in indices]
+    doc_ids = [str(state.cleaned_df["doc_id"].tolist()[index]) for index in indices]
+    result = analyze_ner(texts, options, doc_ids=doc_ids)
+    stored = {**result, "options": {
+        "entityTypes": list(options.active_types()),
+        "minMentionCount": options.min_mention_count,
+        "contextWindow": options.context_window,
+        "useModel": options.use_model,
+    }}
+    state.ner_results[language] = stored
+    state.ner_done_languages.add(language)
+    state.step_ner_done = True
+    response = {key: value for key, value in result.items()}
+    response["chart"] = result.get("typeChart") or []
+    return response
+
+
 def _selected_language(payload: Dict[str, Any]) -> str:
     state = get_state()
     requested = str(payload.get("language") or "").strip().lower()
@@ -596,6 +659,8 @@ def _export_items(payload: Dict[str, Any]) -> Dict[str, Any]:
         {"key": "word_cloud", "filename": "{language}/word_cloud.png", "label": "词云 PNG", "available": True},
         {"key": "sentiment_documents", "filename": "{language}/sentiment_documents.csv", "label": "情感文献明细", "available": True},
         {"key": "sentiment_summary", "filename": "{language}/sentiment_summary.csv", "label": "情感聚合摘要", "available": True},
+        {"key": "entities", "filename": "{language}/entities.csv", "label": "实体聚合表", "available": True},
+        {"key": "entity_mentions", "filename": "{language}/entity_mentions.csv", "label": "实体出现明细", "available": True},
         {"key": "lda_topic_word", "filename": "{language}/lda_topic_word.csv", "label": "LDA 主题词", "available": True},
         {"key": "lda_doc_topic", "filename": "{language}/lda_doc_topic.csv", "label": "LDA 文献主题", "available": True},
         {"key": "lda_coherence", "filename": "{language}/lda_coherence.json", "label": "LDA 一致性", "available": True},
@@ -618,6 +683,7 @@ def _run_export(payload: Dict[str, Any]) -> Dict[str, Any]:
     default_items = {
         "documents", "cleaned_documents", "tokens_corpus", "lda_topic_word", "lda_doc_topic",
         "word_frequency", "word_cloud", "sentiment_documents", "sentiment_summary",
+        "entities", "entity_mentions",
         "lda_coherence", "stm_topic_word", "stm_doc_topic", "stm_prevalence", "session_config",
     }
     selected = set(payload.get("exportItems") or default_items)
@@ -678,6 +744,17 @@ def _run_export(payload: Dict[str, Any]) -> Dict[str, Any]:
                 for key in sorted(sentiment_keys):
                     errors.append({"key": key, "language": language, "error": str(exc)})
 
+        ner_keys = selected & {"entities", "entity_mentions"}
+        if ner_keys:
+            try:
+                result = _run_ner({**payload, "language": language})
+                exported.extend(write_ner_outputs(
+                    language_dir, result.get("entities") or [], result.get("mentions") or [], selected
+                ))
+            except Exception as exc:
+                for key in sorted(ner_keys):
+                    errors.append({"key": key, "language": language, "error": str(exc)})
+
         if selected & lda_keys:
             try:
                 _run_lda({**payload, "language": language})
@@ -733,6 +810,7 @@ def _run_export(payload: Dict[str, Any]) -> Dict[str, Any]:
             "fieldMapping": state.document_col_map,
             "frequencyCompletedLanguages": sorted(state.frequency_done_languages),
             "sentimentCompletedLanguages": sorted(state.sentiment_done_languages),
+            "nerCompletedLanguages": sorted(state.ner_done_languages),
         })
         with open(os.path.join(output_dir, "session_config.json"), "w", encoding="utf-8") as file:
             json.dump(config, file, ensure_ascii=False, indent=2)
@@ -773,14 +851,17 @@ def handle(command: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         state.tokens_list = None
         state.frequency_results.clear()
         state.sentiment_results.clear()
+        state.ner_results.clear()
         state.lda_results.clear()
         state.stm_results.clear()
         state.frequency_done_languages.clear()
         state.sentiment_done_languages.clear()
+        state.ner_done_languages.clear()
         state.lda_done_languages.clear()
         state.stm_done_languages.clear()
         state.step_frequency_done = False
         state.step_sentiment_done = False
+        state.step_ner_done = False
         state.step_lda_done = False
         state.step_stm_done = False
     _remember_session_payload(payload)
@@ -794,6 +875,8 @@ def handle(command: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         data = _run_frequency(payload)
     elif command in {"task.sentiment", "sentiment.analyze"}:
         data = _run_sentiment(payload)
+    elif command in {"task.ner", "ner.analyze"}:
+        data = _run_ner(payload)
     elif command in {"task.lda", "lda.train"}:
         data = _run_lda(payload)
     elif command == "lda.open_pyldavis":

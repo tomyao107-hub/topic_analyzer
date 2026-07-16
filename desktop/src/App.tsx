@@ -1,13 +1,13 @@
 import {
   Activity, AlertTriangle, BarChart3, CheckCircle2, Circle, CircleCheck, Cloud, Database, Download,
-  FileInput, FolderOpen, Heart, ImageDown, Layers3, Play, RefreshCw, Scissors, SplitSquareHorizontal, Table2
+  FileInput, FolderOpen, Heart, ImageDown, Layers3, Play, RefreshCw, Scissors, SplitSquareHorizontal, Table2, Users
 } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { routes } from "./routes";
 import {
   useWorkflowStore, type LanguageCode, type RouteKey, type TaskKey, type TaskResult,
-  type WorkflowSummary, type FrequencyParams, type SentimentParams, type LdaParams, type StmParams
+  type WorkflowSummary, type FrequencyParams, type SentimentParams, type NerParams, type EntityType, type LdaParams, type StmParams
 } from "./state/workflowStore";
 
 const languageLabels: Record<LanguageCode, string> = { zh: "中文", en: "英文" };
@@ -18,6 +18,7 @@ const pageCopy: Record<RouteKey, { title: string; eyebrow: string; description: 
   clean: { title: "清洗与分词", eyebrow: "语言感知预处理", description: "中文使用 jieba，英文使用轻量规范化与拉丁词分词，原文始终保留。" },
   frequency: { title: "词频分析与词云", eyebrow: "v2.1 双语宏观观察", description: "基于清洗后的 tokens 分别统计总词频和文档频率，并生成可复核词云。" },
   sentiment: { title: "情感分析", eyebrow: "v2.2 词典与规则", description: "基于清洗后的 tokens 用透明的情感词典与否定、程度规则计算文献情感倾向。" },
+  ner: { title: "命名实体识别", eyebrow: "v2.3 统计模型与词典规则", description: "从原文中抽取人名、地名、机构、官职与时间五类实体，保留字符位置与上下文以便人工复核。" },
   lda: { title: "LDA 主题建模", eyebrow: "按语言独立训练", description: "中文和英文使用独立词表与模型，结果不会相互覆盖。" },
   stm: { title: "STM 结构主题模型", eyebrow: "历史元数据协变量", description: "从来源、年份、文类及自定义字段中选择协变量。" },
   compare: { title: "对比分析", eyebrow: "动态历史维度", description: "只在同一语言模型内按来源、年份或自定义元数据聚合主题。" },
@@ -32,7 +33,7 @@ export function App() {
       <aside className="sidebar">
         <div className="brand-block">
           <div className="brand-mark" aria-label="历史文献主题分析工具 logo"><BarChart3 size={24} /></div>
-          <div><div className="brand-title">主题分析</div><div className="brand-subtitle">历史文献工作台 v2.2</div></div>
+          <div><div className="brand-title">主题分析</div><div className="brand-subtitle">历史文献工作台 v2.3</div></div>
         </div>
         <nav className="nav-list" aria-label="主导航">
           {routes.map(({ key, label, description, Icon }) => (
@@ -53,6 +54,7 @@ export function App() {
           <StatusItem label="清洗" active={state.workflow.cleaned} />
           <StatusItem label="词频" active={state.workflow.frequencyDone} />
           <StatusItem label="情感" active={state.workflow.sentimentDone} />
+          <StatusItem label="实体" active={state.workflow.nerDone} />
           <StatusItem label="LDA" active={state.workflow.ldaDone} />
           <StatusItem label="STM" active={state.workflow.stmDone} />
         </section>
@@ -93,6 +95,7 @@ function WorkflowPage({ route }: { route: Exclude<RouteKey, "welcome"> }) {
       {route === "clean" && <CleanPage />}
       {route === "frequency" && <FrequencyPage />}
       {route === "sentiment" && <SentimentPage />}
+      {route === "ner" && <NerPage />}
       {route === "lda" && <LdaPage />}
       {route === "stm" && <StmPage />}
       {route === "compare" && <ComparePage />}
@@ -315,6 +318,75 @@ function SentimentPage() {
   </>;
 }
 
+const ENTITY_TYPE_LABELS: Array<[EntityType, string]> = [
+  ["person", "人名"], ["location", "地名"], ["organization", "机构"], ["office", "官职"], ["time", "时间"]
+];
+
+function NerPage() {
+  const store = useWorkflowStore();
+  const language = store.configs.nerLanguage;
+  const config = store.configs.ner[language];
+  const result = store.results.ner[language];
+  const summary = toRecord(result?.summary);
+  const typeCounts = toRecord(summary.typeCounts);
+  const entities = toRows(result?.entities);
+  const mentions = toRows(result?.mentions);
+  const engine = typeof result?.engine === "string" ? result.engine : "";
+  const modelAvailable = summary.modelAvailable !== false;
+  const update = (values: Partial<NerParams>) => store.setModelConfig("ner", language, values);
+  const toggleType = (type: EntityType, checked: boolean) => {
+    const next = checked ? [...new Set([...config.entityTypes, type])] : config.entityTypes.filter((item) => item !== type);
+    update({ entityTypes: next.length ? next : config.entityTypes });
+  };
+  const dictionaries: Array<[EntityType, keyof NerParams, string]> = [
+    ["person", "personText", "自定义人名"], ["location", "locationText", "自定义地名"],
+    ["organization", "organizationText", "自定义机构"], ["office", "officeText", "自定义官职"],
+    ["time", "timeText", "自定义时间词/年号"]
+  ];
+  const maxCount = Math.max(1, ...ENTITY_TYPE_LABELS.map(([type]) => Number(typeCounts[type] ?? 0)));
+  return <>
+    <section className="control-panel">
+      <div className="panel-title"><Users size={18} />实体识别参数</div>
+      <LanguageSelect value={language} onChange={(value) => store.setModelLanguage("ner", value)} />
+      <fieldset className="parameter-fieldset"><legend>识别实体类型</legend><div className="export-item-grid">{ENTITY_TYPE_LABELS.map(([type, label]) => (
+        <Toggle key={type} label={label} checked={config.entityTypes.includes(type)} onChange={(checked) => toggleType(type, checked)} />
+      ))}</div></fieldset>
+      <div className="parameter-form parameter-grid">
+        <NumberField label="最低出现次数" value={config.minMentionCount} min={1} max={1000} onChange={(minMentionCount) => update({ minMentionCount })} />
+        <NumberField label="上下文窗口(字符)" value={config.contextWindow} min={0} max={200} onChange={(contextWindow) => update({ contextWindow })} />
+        {language === "zh" && <Toggle label="启用 jieba 统计模型" checked={config.useModel} onChange={(useModel) => update({ useModel })} />}
+      </div>
+      <div className="language-clean-grid">{dictionaries.map(([type, key, label]) => (
+        <fieldset className="parameter-fieldset" key={type}><legend>{label}（每行一个）</legend><textarea value={String(config[key] ?? "")} placeholder="扩充或补充内置词典" onChange={(event) => update({ [key]: event.target.value } as Partial<NerParams>)} /></fieldset>
+      ))}</div>
+      <p className="field-note">识别在原文上进行，字符位置与上下文可回溯；别名与异体字保留原值，不做自动合并，结果需人工复核。</p>
+      <button className="primary-button" type="button" disabled={!store.workflow.cleaned || store.tasks.ner.status === "running" || store.summary.languageRows[language] === 0} onClick={() => store.runBackendTask("ner")}><Play size={17} />识别{languageLabels[language]}实体</button>
+    </section>
+    <section className="metric-grid">
+      <Metric label="分析文献" value={Number(summary.documents ?? 0) || "待分析"} />
+      <Metric label="实体总数" value={Number(summary.entities ?? 0)} />
+      <Metric label="实体出现次数" value={Number(summary.mentions ?? 0)} />
+      <Metric label="识别引擎" value={modelAvailable ? "已就绪" : "词典/规则回退"} />
+    </section>
+    {engine && <p className="field-note"><Activity size={15} />当前引擎：{engine}{!modelAvailable && "（统计模型不可用，已回退到词典与规则，请检查运行环境）"}</p>}
+    <section className="result-section">
+      <div className="result-heading"><BarChart3 size={19} /><span>实体类型分布</span></div>
+      {!entities.length ? <Empty text="完成识别后显示各类型实体数量。" /> : <div className="frequency-bars">{ENTITY_TYPE_LABELS.filter(([type]) => config.entityTypes.includes(type)).map(([type, label]) => {
+        const value = Number(typeCounts[type] ?? 0);
+        return <div className="frequency-bar" key={type}><span>{label}</span><div><i style={{ width: `${Math.max(2, value / maxCount * 100)}%` }} /></div><strong>{value}</strong></div>;
+      })}</div>}
+    </section>
+    <section className="result-section">
+      <div className="result-heading"><Users size={19} /><span>实体聚合表</span></div>
+      <ResultTable columns={["rank", "entity", "entity_type_label", "mention_count", "document_count", "sources"]} rows={entities} emptyText="完成识别后显示实体、类型、出现次数与来源。" />
+    </section>
+    <section className="result-section">
+      <div className="result-heading"><Table2 size={19} /><span>实体出现明细（含原文上下文）</span></div>
+      <ResultTable columns={["doc_id", "entity", "entity_type_label", "start", "end", "source", "context"]} rows={mentions} emptyText="完成识别后显示每次出现的文献、位置与上下文。" />
+    </section>
+  </>;
+}
+
 function LdaPage() {
   const store = useWorkflowStore();
   const language = store.configs.ldaLanguage;
@@ -388,6 +460,7 @@ function ExportPage() {
     ["documents", "标准化文献表"], ["cleaned_documents", "清洗后文献"], ["tokens_corpus", "分语言语料"],
     ["word_frequency", "词频明细"], ["word_cloud", "词云 PNG"],
     ["sentiment_documents", "情感文献明细"], ["sentiment_summary", "情感聚合摘要"],
+    ["entities", "实体聚合表"], ["entity_mentions", "实体出现明细"],
     ["lda_topic_word", "LDA 主题词"], ["lda_doc_topic", "LDA 文献主题"], ["lda_coherence", "LDA 一致性"],
     ["stm_topic_word", "STM 主题词"], ["stm_doc_topic", "STM 文献主题"], ["stm_prevalence", "STM prevalence"],
     ["session_config", "v2 会话配置"]
@@ -506,10 +579,10 @@ function ResultTable({ columns, rows, emptyText = "暂无数据" }: { columns: s
   return <div className="table-scroll"><table className="result-table"><thead><tr>{visible.map((column) => <th key={column}>{column}</th>)}</tr></thead><tbody>{rows.slice(0, 200).map((row, index) => <tr key={String(row.doc_id ?? index)}>{visible.map((column) => <td key={column}>{formatCell(row[column])}</td>)}</tr>)}</tbody></table></div>;
 }
 
-function canRun(route: Exclude<RouteKey, "welcome">, workflow: { imported: boolean; cleaned: boolean; frequencyDone: boolean; sentimentDone: boolean; ldaDone: boolean; stmDone: boolean }) {
+function canRun(route: Exclude<RouteKey, "welcome">, workflow: { imported: boolean; cleaned: boolean; frequencyDone: boolean; sentimentDone: boolean; nerDone: boolean; ldaDone: boolean; stmDone: boolean }) {
   if (route === "import") return true;
   if (route === "clean") return workflow.imported;
-  if (route === "frequency" || route === "sentiment" || route === "lda" || route === "stm") return workflow.cleaned;
+  if (route === "frequency" || route === "sentiment" || route === "ner" || route === "lda" || route === "stm") return workflow.cleaned;
   if (route === "compare") return workflow.ldaDone || workflow.stmDone;
   return workflow.imported;
 }
