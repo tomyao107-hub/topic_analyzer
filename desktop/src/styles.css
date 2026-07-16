@@ -842,6 +842,26 @@ h1 {
   text-align: right;
 }
 
+.frequency-bar.sentiment-positive i {
+  background: linear-gradient(90deg, #24724a, #55a775);
+}
+
+.frequency-bar.sentiment-neutral i {
+  background: linear-gradient(90deg, #8a94a3, #b5bdc8);
+}
+
+.frequency-bar.sentiment-negative i {
+  background: linear-gradient(90deg, #b23b3b, #d98282);
+}
+
+.frequency-bar.sentiment-negative strong {
+  color: #b23b3b;
+}
+
+.frequency-bar.sentiment-neutral strong {
+  color: #6b7684;
+}
+
 .word-cloud-image {
   display: block;
   width: 100%;

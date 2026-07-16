@@ -109,6 +109,7 @@ async fn run_python_task(
         "import" => "task.import",
         "clean" => "task.clean",
         "frequency" => "task.frequency",
+        "sentiment" => "task.sentiment",
         "lda" => "task.lda",
         "lda-vis" => "lda.open_pyldavis",
         "stm" => "task.stm",

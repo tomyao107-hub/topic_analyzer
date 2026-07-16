@@ -1,4 +1,4 @@
-import { Boxes, Cloud, Download, FileInput, Home, Layers3, Scissors, SplitSquareHorizontal } from "lucide-react";
+import { Boxes, Cloud, Download, FileInput, Heart, Home, Layers3, Scissors, SplitSquareHorizontal } from "lucide-react";
 import type { RouteKey } from "./state/workflowStore";
 
 export type AppRoute = {
@@ -13,6 +13,7 @@ export const routes: AppRoute[] = [
   { key: "import", label: "导入", description: "单表字段识别与严格校验", Icon: FileInput },
   { key: "clean", label: "清洗", description: "中英文清洗、分词与停用词", Icon: Scissors },
   { key: "frequency", label: "词频", description: "高频词、文档频率与词云", Icon: Cloud },
+  { key: "sentiment", label: "情感", description: "词典规则情感评分与聚合", Icon: Heart },
   { key: "lda", label: "LDA", description: "主题建模与一致性", Icon: Layers3 },
   { key: "stm", label: "STM", description: "协变量建模与 R 环境", Icon: Boxes },
   { key: "compare", label: "对比", description: "动态历史元数据维度", Icon: SplitSquareHorizontal },

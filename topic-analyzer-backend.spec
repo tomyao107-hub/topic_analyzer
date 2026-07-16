@@ -6,6 +6,15 @@ for package in ("wordcloud", "pyLDAvis"):
     datas += collect_data_files(package)
     binaries += collect_dynamic_libs(package)
 
+# Bundle first-party sentiment lexicons (v2.2). services.sentiment_service resolves
+# these via sys._MEIPASS/data/sentiment in the frozen sidecar.
+datas += [
+    ("data/sentiment/en/vader_lexicon.txt", "data/sentiment/en"),
+    ("data/sentiment/zh/positive.txt", "data/sentiment/zh"),
+    ("data/sentiment/zh/negative.txt", "data/sentiment/zh"),
+    ("data/sentiment/zh/negation.txt", "data/sentiment/zh"),
+]
+
 # rpy2 remains optional at runtime, but include its Python modules so packaged STM
 # works when the user has installed R and the R package stm.
 hiddenimports += [

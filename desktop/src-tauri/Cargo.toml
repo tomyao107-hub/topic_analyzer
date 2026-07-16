@@ -1,6 +1,6 @@
 [package]
 name = "topic-analyzer-desktop"
-version = "2.1.0"
+version = "2.2.0"
 description = "Tauri desktop shell for bilingual historical document topic analysis"
 authors = ["Topic Analyzer"]
 edition = "2021"

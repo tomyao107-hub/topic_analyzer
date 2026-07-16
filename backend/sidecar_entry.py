@@ -1,4 +1,4 @@
-"""PyInstaller entry point for the v2.1 Tauri analysis sidecar."""
+"""PyInstaller entry point for the v2.2 Tauri analysis sidecar."""
 import sys
 
 # A frozen Windows console can otherwise inherit the active OEM code page even

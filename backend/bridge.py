@@ -17,7 +17,8 @@ from services.clean_service import CleanOptions, clean_text, get_default_stopwor
 from services.compare_service import build_compare_summary, representative_articles
 from services.data_service import DocumentValidationError, load_documents
 from services.frequency_service import FrequencyOptions, analyze_word_frequency, render_word_cloud_png
-from services.export_service import write_frequency_outputs
+from services.sentiment_service import SentimentOptions, analyze_sentiment
+from services.export_service import write_frequency_outputs, write_sentiment_outputs
 from services.lda_service import build_corpus, compute_coherence, get_doc_topics, get_topics, open_pyldavis, train_lda
 from services.stm_service import _analyze_stm_column, check_r_environment, train_stm
 
@@ -93,6 +94,7 @@ def _state_snapshot() -> Dict[str, Any]:
             "imported": state.step_imported,
             "cleaned": state.step_cleaned,
             "frequencyDone": bool(state.frequency_done_languages),
+            "sentimentDone": bool(state.sentiment_done_languages),
             "ldaDone": bool(state.lda_done_languages),
             "stmDone": bool(state.stm_done_languages),
         },
@@ -100,6 +102,7 @@ def _state_snapshot() -> Dict[str, Any]:
             language: {
                 "cleaned": language in state.cleaned_languages,
                 "frequencyDone": language in state.frequency_done_languages,
+                "sentimentDone": language in state.sentiment_done_languages,
                 "ldaDone": language in state.lda_done_languages,
                 "stmDone": language in state.stm_done_languages,
             }
@@ -119,6 +122,10 @@ def _state_snapshot() -> Dict[str, Any]:
             "uniqueWords": {key: len(value) for key, value in unique_words.items()},
             "frequencyWords": {
                 language: len(state.frequency_results.get(language, {}).get("rows") or [])
+                for language in LANGUAGES
+            },
+            "sentimentDocuments": {
+                language: len(state.sentiment_results.get(language, {}).get("rows") or [])
                 for language in LANGUAGES
             },
             "ldaTopics": lda_topics,
@@ -358,6 +365,60 @@ def _run_frequency(payload: Dict[str, Any], include_image: bool = True) -> Dict[
     return response
 
 
+def _sentiment_options(payload: Dict[str, Any], language: str) -> SentimentOptions:
+    configs = payload.get("sentimentConfigs") or {}
+    values = configs.get(language) or payload.get("sentimentConfig") or payload
+    positive = tuple(str(word).strip() for word in (values.get("positiveWords") or []) if str(word).strip())
+    negative = tuple(str(word).strip() for word in (values.get("negativeWords") or []) if str(word).strip())
+    return SentimentOptions(
+        language=language,
+        positive_threshold=float(values.get("positiveThreshold", 0.05)),
+        negative_threshold=float(values.get("negativeThreshold", -0.05)),
+        use_negation=bool(values.get("useNegation", True)),
+        use_degree=bool(values.get("useDegree", True)),
+        top_evidence=int(values.get("topEvidence", 8)),
+        group_by=str(values.get("groupBy") or "").strip(),
+        positive_words=positive,
+        negative_words=negative,
+    )
+
+
+def _run_sentiment(payload: Dict[str, Any]) -> Dict[str, Any]:
+    state = get_state()
+    _ensure_clean(payload)
+    language = _selected_language(payload)
+    options = _sentiment_options(payload, language)
+    indices = [
+        index for index, value in enumerate(state.cleaned_df["language"].tolist())
+        if value == language
+    ]
+    tokens = [state.tokens_list[index] for index in indices]
+    doc_ids = [str(state.cleaned_df["doc_id"].tolist()[index]) for index in indices]
+    metadata = [
+        {key: state.cleaned_df.iloc[index][key] for key in state.cleaned_df.columns}
+        for index in indices
+    ]
+    result = analyze_sentiment(tokens, options, doc_ids=doc_ids, metadata=metadata)
+    stored = {**result, "options": {
+        "positiveThreshold": options.positive_threshold,
+        "negativeThreshold": options.negative_threshold,
+        "useNegation": options.use_negation,
+        "useDegree": options.use_degree,
+        "topEvidence": options.top_evidence,
+        "groupBy": options.group_by,
+    }}
+    state.sentiment_results[language] = stored
+    state.sentiment_done_languages.add(language)
+    state.step_sentiment_done = True
+    response = {key: value for key, value in result.items()}
+    distribution = result["summary"]["distribution"]
+    response["chart"] = [
+        {"label": label, "value": distribution.get(label, 0)}
+        for label in ("positive", "neutral", "negative")
+    ]
+    return response
+
+
 def _selected_language(payload: Dict[str, Any]) -> str:
     state = get_state()
     requested = str(payload.get("language") or "").strip().lower()
@@ -533,6 +594,8 @@ def _export_items(payload: Dict[str, Any]) -> Dict[str, Any]:
         {"key": "tokens_corpus", "filename": "{language}/tokens_corpus.txt", "label": "分语言语料", "available": True},
         {"key": "word_frequency", "filename": "{language}/word_frequency.csv", "label": "词频明细", "available": True},
         {"key": "word_cloud", "filename": "{language}/word_cloud.png", "label": "词云 PNG", "available": True},
+        {"key": "sentiment_documents", "filename": "{language}/sentiment_documents.csv", "label": "情感文献明细", "available": True},
+        {"key": "sentiment_summary", "filename": "{language}/sentiment_summary.csv", "label": "情感聚合摘要", "available": True},
         {"key": "lda_topic_word", "filename": "{language}/lda_topic_word.csv", "label": "LDA 主题词", "available": True},
         {"key": "lda_doc_topic", "filename": "{language}/lda_doc_topic.csv", "label": "LDA 文献主题", "available": True},
         {"key": "lda_coherence", "filename": "{language}/lda_coherence.json", "label": "LDA 一致性", "available": True},
@@ -554,8 +617,8 @@ def _run_export(payload: Dict[str, Any]) -> Dict[str, Any]:
     state.project_name = str(payload.get("projectName") or state.project_name)
     default_items = {
         "documents", "cleaned_documents", "tokens_corpus", "lda_topic_word", "lda_doc_topic",
-        "word_frequency", "word_cloud", "lda_coherence", "stm_topic_word", "stm_doc_topic",
-        "stm_prevalence", "session_config",
+        "word_frequency", "word_cloud", "sentiment_documents", "sentiment_summary",
+        "lda_coherence", "stm_topic_word", "stm_doc_topic", "stm_prevalence", "session_config",
     }
     selected = set(payload.get("exportItems") or default_items)
     available_languages = [language for language, count in _language_counts(state.documents_df).items() if count]
@@ -602,6 +665,17 @@ def _run_export(payload: Dict[str, Any]) -> Dict[str, Any]:
                 exported.extend(write_frequency_outputs(language_dir, result["rows"], values["png"], selected))
             except Exception as exc:
                 for key in sorted(frequency_keys):
+                    errors.append({"key": key, "language": language, "error": str(exc)})
+
+        sentiment_keys = selected & {"sentiment_documents", "sentiment_summary"}
+        if sentiment_keys:
+            try:
+                result = _run_sentiment({**payload, "language": language})
+                exported.extend(write_sentiment_outputs(
+                    language_dir, result["rows"], result.get("aggregation") or [], selected
+                ))
+            except Exception as exc:
+                for key in sorted(sentiment_keys):
                     errors.append({"key": key, "language": language, "error": str(exc)})
 
         if selected & lda_keys:
@@ -658,6 +732,7 @@ def _run_export(payload: Dict[str, Any]) -> Dict[str, Any]:
             "languageRows": _language_counts(state.documents_df),
             "fieldMapping": state.document_col_map,
             "frequencyCompletedLanguages": sorted(state.frequency_done_languages),
+            "sentimentCompletedLanguages": sorted(state.sentiment_done_languages),
         })
         with open(os.path.join(output_dir, "session_config.json"), "w", encoding="utf-8") as file:
             json.dump(config, file, ensure_ascii=False, indent=2)
@@ -697,12 +772,15 @@ def handle(command: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         state.cleaned_df = None
         state.tokens_list = None
         state.frequency_results.clear()
+        state.sentiment_results.clear()
         state.lda_results.clear()
         state.stm_results.clear()
         state.frequency_done_languages.clear()
+        state.sentiment_done_languages.clear()
         state.lda_done_languages.clear()
         state.stm_done_languages.clear()
         state.step_frequency_done = False
+        state.step_sentiment_done = False
         state.step_lda_done = False
         state.step_stm_done = False
     _remember_session_payload(payload)
@@ -714,6 +792,8 @@ def handle(command: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         data = _ensure_clean(payload)
     elif command in {"task.frequency", "frequency.analyze"}:
         data = _run_frequency(payload)
+    elif command in {"task.sentiment", "sentiment.analyze"}:
+        data = _run_sentiment(payload)
     elif command in {"task.lda", "lda.train"}:
         data = _run_lda(payload)
     elif command == "lda.open_pyldavis":

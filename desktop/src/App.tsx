@@ -1,13 +1,13 @@
 import {
   Activity, AlertTriangle, BarChart3, CheckCircle2, Circle, CircleCheck, Cloud, Database, Download,
-  FileInput, FolderOpen, ImageDown, Layers3, Play, RefreshCw, Scissors, SplitSquareHorizontal, Table2
+  FileInput, FolderOpen, Heart, ImageDown, Layers3, Play, RefreshCw, Scissors, SplitSquareHorizontal, Table2
 } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { routes } from "./routes";
 import {
   useWorkflowStore, type LanguageCode, type RouteKey, type TaskKey, type TaskResult,
-  type WorkflowSummary, type FrequencyParams, type LdaParams, type StmParams
+  type WorkflowSummary, type FrequencyParams, type SentimentParams, type LdaParams, type StmParams
 } from "./state/workflowStore";
 
 const languageLabels: Record<LanguageCode, string> = { zh: "中文", en: "英文" };
@@ -17,6 +17,7 @@ const pageCopy: Record<RouteKey, { title: string; eyebrow: string; description: 
   import: { title: "导入文献表", eyebrow: "v2 单表数据模型", description: "一行一篇文献；doc_id、text、language 为必填字段。" },
   clean: { title: "清洗与分词", eyebrow: "语言感知预处理", description: "中文使用 jieba，英文使用轻量规范化与拉丁词分词，原文始终保留。" },
   frequency: { title: "词频分析与词云", eyebrow: "v2.1 双语宏观观察", description: "基于清洗后的 tokens 分别统计总词频和文档频率，并生成可复核词云。" },
+  sentiment: { title: "情感分析", eyebrow: "v2.2 词典与规则", description: "基于清洗后的 tokens 用透明的情感词典与否定、程度规则计算文献情感倾向。" },
   lda: { title: "LDA 主题建模", eyebrow: "按语言独立训练", description: "中文和英文使用独立词表与模型，结果不会相互覆盖。" },
   stm: { title: "STM 结构主题模型", eyebrow: "历史元数据协变量", description: "从来源、年份、文类及自定义字段中选择协变量。" },
   compare: { title: "对比分析", eyebrow: "动态历史维度", description: "只在同一语言模型内按来源、年份或自定义元数据聚合主题。" },
@@ -31,7 +32,7 @@ export function App() {
       <aside className="sidebar">
         <div className="brand-block">
           <div className="brand-mark" aria-label="历史文献主题分析工具 logo"><BarChart3 size={24} /></div>
-          <div><div className="brand-title">主题分析</div><div className="brand-subtitle">历史文献工作台 v2.1</div></div>
+          <div><div className="brand-title">主题分析</div><div className="brand-subtitle">历史文献工作台 v2.2</div></div>
         </div>
         <nav className="nav-list" aria-label="主导航">
           {routes.map(({ key, label, description, Icon }) => (
@@ -51,6 +52,7 @@ export function App() {
           <StatusItem label="导入" active={state.workflow.imported} />
           <StatusItem label="清洗" active={state.workflow.cleaned} />
           <StatusItem label="词频" active={state.workflow.frequencyDone} />
+          <StatusItem label="情感" active={state.workflow.sentimentDone} />
           <StatusItem label="LDA" active={state.workflow.ldaDone} />
           <StatusItem label="STM" active={state.workflow.stmDone} />
         </section>
@@ -90,6 +92,7 @@ function WorkflowPage({ route }: { route: Exclude<RouteKey, "welcome"> }) {
       {route === "import" && <ImportPage />}
       {route === "clean" && <CleanPage />}
       {route === "frequency" && <FrequencyPage />}
+      {route === "sentiment" && <SentimentPage />}
       {route === "lda" && <LdaPage />}
       {route === "stm" && <StmPage />}
       {route === "compare" && <ComparePage />}
@@ -251,6 +254,67 @@ function FrequencyPage() {
   </>;
 }
 
+function SentimentPage() {
+  const store = useWorkflowStore();
+  const language = store.configs.sentimentLanguage;
+  const config = store.configs.sentiment[language];
+  const result = store.results.sentiment[language];
+  const summary = toRecord(result?.summary);
+  const distribution = toRecord(summary.distribution);
+  const rows = toRows(result?.rows);
+  const aggregation = toRows(result?.aggregation);
+  const fields = toMetadataFields(store.results.import?.metadataFields);
+  const update = (values: Partial<SentimentParams>) => store.setModelConfig("sentiment", language, values);
+  const counts = {
+    positive: Number(distribution.positive ?? 0),
+    neutral: Number(distribution.neutral ?? 0),
+    negative: Number(distribution.negative ?? 0)
+  };
+  const totalDocs = Math.max(1, counts.positive + counts.neutral + counts.negative);
+  const bars: Array<[string, number, string]> = [
+    ["正面", counts.positive, "positive"], ["中性", counts.neutral, "neutral"], ["负面", counts.negative, "negative"]
+  ];
+  return <>
+    <section className="control-panel">
+      <div className="panel-title"><Heart size={18} />情感参数</div>
+      <LanguageSelect value={language} onChange={(value) => store.setModelLanguage("sentiment", value)} />
+      <div className="parameter-form parameter-grid">
+        <NumberField label="正面阈值" value={config.positiveThreshold} min={0} max={1} step={0.01} onChange={(positiveThreshold) => update({ positiveThreshold })} />
+        <NumberField label="负面阈值" value={config.negativeThreshold} min={-1} max={0} step={0.01} onChange={(negativeThreshold) => update({ negativeThreshold })} />
+        <NumberField label="证据词上限" value={config.topEvidence} min={1} max={30} onChange={(topEvidence) => update({ topEvidence })} />
+        <SelectField label="聚合维度（可选）" value={config.groupBy} options={[["", "不聚合"], ...fields.map(({ field }) => [field, field] as const)]} onChange={(groupBy) => update({ groupBy })} />
+      </div>
+      <div className="parameter-form parameter-grid">
+        <Toggle label="启用否定词翻转" checked={config.useNegation} onChange={(useNegation) => update({ useNegation })} />
+        <Toggle label="启用程度副词缩放" checked={config.useDegree} onChange={(useDegree) => update({ useDegree })} />
+      </div>
+      <div className="language-clean-grid">
+        <fieldset className="parameter-fieldset"><legend>自定义正面词（每行一个）</legend><textarea value={config.positiveText} placeholder="覆盖或补充内置正面词典" onChange={(event) => update({ positiveText: event.target.value })} /></fieldset>
+        <fieldset className="parameter-fieldset"><legend>自定义负面词（每行一个）</legend><textarea value={config.negativeText} placeholder="覆盖或补充内置负面词典" onChange={(event) => update({ negativeText: event.target.value })} /></fieldset>
+      </div>
+      <p className="field-note">情感分类是算法测量结果，请结合文本证据与历史语境解释；相同语料和词典配置产生稳定结果。</p>
+      <button className="primary-button" type="button" disabled={!store.workflow.cleaned || store.tasks.sentiment.status === "running" || store.summary.totalTokens[language] === 0} onClick={() => store.runBackendTask("sentiment")}><Play size={17} />分析{languageLabels[language]}情感</button>
+    </section>
+    <section className="metric-grid">
+      <Metric label="分析文献" value={Number(summary.documents ?? 0) || "待分析"} />
+      <Metric label="平均情感分" value={typeof summary.averageScore === "number" ? summary.averageScore.toFixed(3) : "0.000"} />
+      <Metric label="命中情感词" value={Number(summary.matchedWords ?? 0)} />
+      <Metric label="词典规模" value={Number(summary.lexiconSize ?? 0)} />
+    </section>
+    <section className="result-section">
+      <div className="result-heading"><BarChart3 size={19} /><span>情感分布</span></div>
+      {!rows.length ? <Empty text="完成分析后显示情感分布。" /> : <div className="frequency-bars">{bars.map(([label, value, tone]) => (
+        <div className={`frequency-bar sentiment-${tone}`} key={label}><span>{label}</span><div><i style={{ width: `${Math.max(2, value / totalDocs * 100)}%` }} /></div><strong>{value}</strong></div>
+      ))}</div>}
+      {aggregation.length > 0 && <ResultTable columns={["group", "documents", "positive", "neutral", "negative", "average_score"]} rows={aggregation} />}
+    </section>
+    <section className="result-section">
+      <div className="result-heading"><Heart size={19} /><span>文献情感明细</span></div>
+      <ResultTable columns={["doc_id", "sentiment_label", "score", "positive_hits", "negative_hits", "positive_terms", "negative_terms"]} rows={rows} emptyText="完成分析后显示逐篇情感得分与证据词。" />
+    </section>
+  </>;
+}
+
 function LdaPage() {
   const store = useWorkflowStore();
   const language = store.configs.ldaLanguage;
@@ -323,6 +387,7 @@ function ExportPage() {
   const items = [
     ["documents", "标准化文献表"], ["cleaned_documents", "清洗后文献"], ["tokens_corpus", "分语言语料"],
     ["word_frequency", "词频明细"], ["word_cloud", "词云 PNG"],
+    ["sentiment_documents", "情感文献明细"], ["sentiment_summary", "情感聚合摘要"],
     ["lda_topic_word", "LDA 主题词"], ["lda_doc_topic", "LDA 文献主题"], ["lda_coherence", "LDA 一致性"],
     ["stm_topic_word", "STM 主题词"], ["stm_doc_topic", "STM 文献主题"], ["stm_prevalence", "STM prevalence"],
     ["session_config", "v2 会话配置"]
@@ -441,10 +506,10 @@ function ResultTable({ columns, rows, emptyText = "暂无数据" }: { columns: s
   return <div className="table-scroll"><table className="result-table"><thead><tr>{visible.map((column) => <th key={column}>{column}</th>)}</tr></thead><tbody>{rows.slice(0, 200).map((row, index) => <tr key={String(row.doc_id ?? index)}>{visible.map((column) => <td key={column}>{formatCell(row[column])}</td>)}</tr>)}</tbody></table></div>;
 }
 
-function canRun(route: Exclude<RouteKey, "welcome">, workflow: { imported: boolean; cleaned: boolean; frequencyDone: boolean; ldaDone: boolean; stmDone: boolean }) {
+function canRun(route: Exclude<RouteKey, "welcome">, workflow: { imported: boolean; cleaned: boolean; frequencyDone: boolean; sentimentDone: boolean; ldaDone: boolean; stmDone: boolean }) {
   if (route === "import") return true;
   if (route === "clean") return workflow.imported;
-  if (route === "frequency" || route === "lda" || route === "stm") return workflow.cleaned;
+  if (route === "frequency" || route === "sentiment" || route === "lda" || route === "stm") return workflow.cleaned;
   if (route === "compare") return workflow.ldaDone || workflow.stmDone;
   return workflow.imported;
 }

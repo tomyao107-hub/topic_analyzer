@@ -1,10 +1,10 @@
-# 历史文献主题分析工具 v2.1
+# 历史文献主题分析工具 v2.2
 
-面向数字人文与历史研究的中英文主题分析桌面工具。v2.1 使用一张文献表完成导入、清洗、词频与词云、LDA、STM、历史元数据对比和分语言导出。
+面向数字人文与历史研究的中英文主题分析桌面工具。v2.2 使用一张文献表完成导入、清洗、词频与词云、情感分析、LDA、STM、历史元数据对比和分语言导出。
 
 后续数字人文分析能力的开发顺序、功能边界和验收标准见[《数字人文分析功能版本安排》](docs/DIGITAL_HUMANITIES_ROADMAP.md)。
 
-## v2.1 核心能力
+## v2.2 核心能力
 
 - 单表导入：不再接受“元数据表 + 文本表”双文件协议。
 - 双语预处理：中文使用 jieba；英文进行 Unicode 规范化、小写化、跨行断词修复和拉丁词分词。
@@ -12,6 +12,7 @@
 - 广义历史元数据：支持报刊、书信、日记、档案等材料，并保留所有自定义字段。
 - 可复现导出：`session_config.json` 使用 `schemaVersion: 2`，模型结果写入 `zh/`、`en/` 子目录。
 - 词频与词云：按语言计算总词频、文档频率和语料占比，提供稳定排序、柱状图与 PNG 词云。
+- 情感分析：基于内置双语情感词典（英文 VADER，中文 NTUSD 正负词表）与否定、程度规则计算文献情感评分与正/中/负分类，展示证据词并按元数据聚合，支持自定义词典。
 
 ## 输入格式
 
@@ -47,7 +48,7 @@ collection, repository, volume, issue, page, notes, year, month, time_index
 
 ## 启动
 
-v2.1 默认界面为 React + Tauri：
+v2.2 默认界面为 React + Tauri：
 
 ```bat
 run.bat
@@ -78,6 +79,8 @@ zh/
   tokens_corpus.txt
   word_frequency.csv
   word_cloud.png
+  sentiment_documents.csv
+  sentiment_summary.csv
   lda_topic_word.csv
   lda_doc_topic.csv
   lda_coherence.json
@@ -102,4 +105,4 @@ npm run release
 
 `npm run release` 先构建 PyInstaller sidecar，再生成 64 位 Windows NSIS 安装包。发布版核心功能不依赖源码目录或 `.venv`；STM 的 R 环境缺失不会影响其他分析。
 
-本版不直接读取 PDF、Word 或扫描图像，不提供 OCR 识别、自动语言识别、翻译、情感分析、NER 或跨语言主题对齐。
+本版不直接读取 PDF、Word 或扫描图像，不提供 OCR 识别、自动语言识别、翻译、NER 或跨语言主题对齐。情感分析基于词典与规则，是辅助测量结果，不将算法分类表述为客观事实。

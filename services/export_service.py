@@ -11,6 +11,8 @@ EXPORT_ITEMS = (
     ("cleaned_corpus", "tokens_corpus.txt", "分词结果语料", "tokens_list"),
     ("word_frequency", "word_frequency.csv", "词频明细", "frequency_results"),
     ("word_cloud", "word_cloud.png", "词云 PNG", "frequency_results"),
+    ("sentiment_documents", "sentiment_documents.csv", "情感文献明细", "sentiment_results"),
+    ("sentiment_summary", "sentiment_summary.csv", "情感聚合摘要", "sentiment_results"),
     ("lda_topic_word", "lda_topic_word.csv", "LDA 主题词", "lda_topics"),
     ("lda_doc_topic", "lda_doc_topic.csv", "LDA 文档主题分布", "lda_doc_topics"),
     ("lda_coherence", "lda_coherence.json", "LDA 一致性指标", "lda_coherence"),
@@ -71,4 +73,32 @@ def write_frequency_outputs(
         with open(os.path.join(language_dir, "word_cloud.png"), "wb") as file:
             file.write(png)
         exported.append(f"{language}/word_cloud.png")
+    return exported
+
+
+def write_sentiment_outputs(
+    language_dir: str,
+    rows: List[Dict[str, Any]],
+    aggregation: List[Dict[str, Any]],
+    selected: set,
+) -> List[str]:
+    """Write v2.2 sentiment artifacts (per-document scores and grouped summary)."""
+    exported: List[str] = []
+    language = os.path.basename(os.path.normpath(language_dir))
+    if "sentiment_documents" in selected:
+        columns = [
+            "doc_id", "sentiment", "sentiment_label", "score", "raw_score",
+            "matched_words", "positive_hits", "negative_hits", "token_count",
+            "positive_terms", "negative_terms",
+        ]
+        pd.DataFrame(rows, columns=columns).to_csv(
+            os.path.join(language_dir, "sentiment_documents.csv"), index=False, encoding="utf-8-sig"
+        )
+        exported.append(f"{language}/sentiment_documents.csv")
+    if "sentiment_summary" in selected:
+        columns = ["group", "documents", "positive", "neutral", "negative", "average_score"]
+        pd.DataFrame(aggregation, columns=columns).to_csv(
+            os.path.join(language_dir, "sentiment_summary.csv"), index=False, encoding="utf-8-sig"
+        )
+        exported.append(f"{language}/sentiment_summary.csv")
     return exported

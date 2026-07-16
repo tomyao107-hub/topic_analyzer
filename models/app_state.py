@@ -35,6 +35,9 @@ class AppState:
     # ── 词频与词云（按语言隔离）──────────────────────
     frequency_results: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
+    # ── 情感分析（按语言隔离）────────────────────────
+    sentiment_results: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+
     # ── 按语言保存模型结果 ────────────────────────────
     lda_results: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     lda_model: Any = None
@@ -62,10 +65,12 @@ class AppState:
     step_merged: bool = False
     step_cleaned: bool = False
     step_frequency_done: bool = False
+    step_sentiment_done: bool = False
     step_lda_done: bool = False
     step_stm_done: bool = False
     cleaned_languages: set = field(default_factory=set)
     frequency_done_languages: set = field(default_factory=set)
+    sentiment_done_languages: set = field(default_factory=set)
     lda_done_languages: set = field(default_factory=set)
     stm_done_languages: set = field(default_factory=set)
 
