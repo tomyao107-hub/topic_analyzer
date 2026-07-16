@@ -343,7 +343,7 @@ class LDAPage(QWidget):
         self._export_btn.setEnabled(True)
         self._pyldavis_btn.setEnabled(True)
 
-        if coherence and coherence == coherence:  # NaN check
+        if coherence is not None and coherence == coherence:  # 排除 None 与 NaN，但保留 0.0
             self._coherence_label.setText(f"Coherence (c_v): {coherence:.4f}")
             self._coherence_label.setVisible(True)
 
@@ -437,7 +437,10 @@ class LDAPage(QWidget):
             # 显示前5个主题的 top5 词
             colors = ["#2563EB", "#7C3AED", "#DB2777", "#D97706", "#16A34A"]
             n_show = min(5, len(topics))
-            n_words = 5
+            # 主题词可能少于 5 个（语料很小或过滤过狠），x 轴按实际可用词数取，
+            # 否则 set_xticks/set_xticklabels 长度不一致会抛 ValueError。
+            first_words = [w for w, _ in topics[0]["words"][:5]] if n_show > 0 else []
+            n_words = max(1, len(first_words)) if n_show > 0 else 5
 
             x = range(n_words)
             width = 0.15
@@ -446,6 +449,8 @@ class LDAPage(QWidget):
                 t = topics[i]
                 probs = [p for _, p in t["words"][:n_words]]
                 words = [w for w, _ in t["words"][:n_words]]
+                # 若该主题词数不足 n_words，用 0 概率补齐以对齐柱状图 x 位置。
+                probs += [0.0] * (n_words - len(probs))
                 offset = (i - n_show / 2) * width
                 bars = ax.bar([xi + offset for xi in x], probs,
                               width=width * 0.9, color=colors[i],
@@ -453,8 +458,10 @@ class LDAPage(QWidget):
 
             if n_show > 0:
                 ax.set_xticks(range(n_words))
-                ax.set_xticklabels([w for w, _ in topics[0]["words"][:n_words]],
-                                   fontsize=10)
+                # 补齐标签数量与 n_words 一致，避免长度不匹配。
+                labels = first_words[:n_words]
+                labels += [""] * (n_words - len(labels))
+                ax.set_xticklabels(labels, fontsize=10)
                 ax.set_ylabel("概率", fontsize=10)
                 ax.set_title("各主题 Top 5 关键词概率", fontsize=12, color="#1E293B")
                 ax.legend(fontsize=9, framealpha=0.7)
@@ -476,6 +483,9 @@ class LDAPage(QWidget):
 
         except ImportError:
             self._chart_placeholder.setText("请安装 matplotlib 以显示图表：pip install matplotlib")
+        except Exception as exc:
+            # 绘图失败不应中断训练收尾流程（否则忙碌态无法解除）。
+            logger.warning(f"渲染 LDA 主题图表失败：{exc}")
 
     def _open_pyldavis(self):
         state = get_state()

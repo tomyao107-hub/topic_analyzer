@@ -119,7 +119,9 @@ def get_doc_topics(
     for i, bow in enumerate(corpus):
         topic_dist = dict(model.get_document_topics(bow, minimum_probability=0.0))
         row = {f"topic_{t}": topic_dist.get(t, 0.0) for t in range(n_topics)}
-        row["dominant_topic"] = max(row, key=row.get).replace("topic_", "主题")
+        # 主题编号统一为 1 起始，与 STM 及前端主题卡片保持一致。
+        dominant_index = int(max(range(n_topics), key=lambda t: row[f"topic_{t}"]))
+        row["dominant_topic"] = f"主题{dominant_index + 1}"
         rows.append(row)
 
     df = pd.DataFrame(rows)

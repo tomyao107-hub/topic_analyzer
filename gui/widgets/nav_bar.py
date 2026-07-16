@@ -8,13 +8,14 @@ from PySide6.QtCore import Signal, Qt
 from PySide6.QtGui import QFont
 
 # 导航项配置: (object_name, 图标, 文字, 步骤要求)
+# 步骤要求可为单个键，或一个元组（满足其中任意一个即可，用于“对比分析”支持 LDA 或 STM）。
 NAV_ITEMS = [
     ("welcome",   "🏠", "首页",    None),
     ("import",    "📥", "数据导入", None),
     ("clean",     "🧹", "数据清洗", "imported"),
     ("lda",       "📊", "LDA 分析",  "cleaned"),
     ("stm",       "🔬", "STM 分析",  "cleaned"),
-    ("compare",   "⚖️", "对比分析", "lda_done"),
+    ("compare",   "⚖️", "对比分析", ("lda_done", "stm_done")),
     ("export",    "📤", "导出结果", "imported"),
 ]
 
@@ -107,7 +108,10 @@ class NavBar(QWidget):
         }
         for name, icon, text, requires in NAV_ITEMS:
             if requires and name in self._buttons:
-                enabled = states.get(requires, False)
+                if isinstance(requires, tuple):
+                    enabled = any(states.get(key, False) for key in requires)
+                else:
+                    enabled = states.get(requires, False)
                 self._buttons[name].setEnabled(enabled)
                 tip = "" if enabled else f"请先完成上一步骤"
                 self._buttons[name].setToolTip(tip)
