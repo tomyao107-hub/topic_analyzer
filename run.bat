@@ -16,6 +16,8 @@ if %errorlevel% neq 0 (
     exit /b 1
 )
 
+set "CARGO_TARGET_DIR=%LOCALAPPDATA%\topic_analyzer_cargo_target"
+
 if not exist .venv (
     py -m venv .venv
 )
