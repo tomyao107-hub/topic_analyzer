@@ -240,7 +240,13 @@ class ComparePage(QWidget):
                     self._newspaper_combo.addItem(str(n))
             if "pub_year" in df.columns:
                 for y in sorted(df["pub_year"].dropna().unique()):
-                    self._year_combo.addItem(str(int(y)) if str(y) != "nan" else "")
+                    # 历史报刊常见非数字年份（如“民國二十四年”），不能强制 int()。
+                    try:
+                        label = str(int(float(y)))
+                    except (TypeError, ValueError):
+                        label = str(y).strip()
+                    if label:
+                        self._year_combo.addItem(label)
             if "genre" in df.columns:
                 for g in sorted(df["genre"].dropna().unique()):
                     self._genre_combo.addItem(str(g))

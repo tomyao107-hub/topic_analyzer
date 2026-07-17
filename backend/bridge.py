@@ -40,6 +40,39 @@ def _number(value: Any) -> Any:
     return value
 
 
+def _json_safe(value: Any) -> Any:
+    """递归清洗，保证结果可被严格 JSON（Rust serde_json）解析。
+
+    处理：NaN/Inf → None、numpy 标量 → 原生类型、pandas 缺失值 → None。
+    Rust 端使用严格 JSON，裸 NaN/Infinity 会导致整个响应解析失败，
+    因此在写出前统一在这里兜底。
+    """
+    if value is None:
+        return None
+    if isinstance(value, float):
+        return None if (math.isnan(value) or math.isinf(value)) else value
+    if isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [_json_safe(item) for item in value]
+    # numpy 标量、pandas 缺失值等
+    try:
+        import numpy as _np
+        if isinstance(value, _np.generic):
+            scalar = value.item()
+            return _json_safe(scalar)
+    except Exception:
+        pass
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+    return value
+
+
 def _json_records(df: pd.DataFrame) -> List[Dict[str, Any]]:
     if df is None or df.empty:
         return []
@@ -351,7 +384,9 @@ def _run_frequency(payload: Dict[str, Any], include_image: bool = True) -> Dict[
     ]
     tokens = [state.tokens_list[index] for index in indices]
     result = analyze_word_frequency(tokens, options)
-    png = render_word_cloud_png(result["rows"], language, options.random_state)
+    # 词云渲染可能因缺少中文字体等原因失败；仅在需要图片时渲染，
+    # 避免导出纯词频 CSV 时被词云错误连带拖垮（见 _run_export）。
+    png = render_word_cloud_png(result["rows"], language, options.random_state) if include_image else None
     stored = {**result, "png": png, "options": {
         "sortBy": options.sort_by,
         "topN": options.top_n,
@@ -367,7 +402,7 @@ def _run_frequency(payload: Dict[str, Any], include_image: bool = True) -> Dict[
         {"word": row["word"], "value": row[options.sort_by], "termFrequency": row["term_frequency"]}
         for row in result["rows"]
     ]
-    if include_image:
+    if include_image and png is not None:
         response["wordCloudPngBase64"] = base64.b64encode(png).decode("ascii")
     return response
 
@@ -688,7 +723,8 @@ def _run_export(payload: Dict[str, Any]) -> Dict[str, Any]:
     }
     selected = set(payload.get("exportItems") or default_items)
     available_languages = [language for language, count in _language_counts(state.documents_df).items() if count]
-    languages = [language for language in payload.get("exportLanguages", available_languages) if language in available_languages]
+    requested_languages = payload.get("exportLanguages") or available_languages
+    languages = [language for language in requested_languages if language in available_languages]
     exported, errors = [], []
 
     def write_common(key, filename, action):
@@ -725,13 +761,33 @@ def _run_export(payload: Dict[str, Any]) -> Dict[str, Any]:
 
         frequency_keys = selected & {"word_frequency", "word_cloud"}
         if frequency_keys:
+            # 先做一次不含图片的词频分析拿到 rows；词频 CSV 与词云 PNG
+            # 各自独立写出，缺少中文字体等词云错误不应连带 CSV 一起失败。
+            frequency_rows = None
             try:
                 result = _run_frequency({**payload, "language": language}, include_image=False)
-                values = state.frequency_results[language]
-                exported.extend(write_frequency_outputs(language_dir, result["rows"], values["png"], selected))
+                frequency_rows = result["rows"]
             except Exception as exc:
                 for key in sorted(frequency_keys):
                     errors.append({"key": key, "language": language, "error": str(exc)})
+            if frequency_rows is not None:
+                if "word_frequency" in selected:
+                    try:
+                        exported.extend(
+                            write_frequency_outputs(language_dir, frequency_rows, None, {"word_frequency"})
+                        )
+                    except Exception as exc:
+                        errors.append({"key": "word_frequency", "language": language, "error": str(exc)})
+                if "word_cloud" in selected:
+                    try:
+                        png = render_word_cloud_png(
+                            frequency_rows, language, _frequency_options(payload, language).random_state
+                        )
+                        exported.extend(
+                            write_frequency_outputs(language_dir, frequency_rows, png, {"word_cloud"})
+                        )
+                    except Exception as exc:
+                        errors.append({"key": "word_cloud", "language": language, "error": str(exc)})
 
         sentiment_keys = selected & {"sentiment_documents", "sentiment_summary"}
         if sentiment_keys:
@@ -771,7 +827,10 @@ def _run_export(payload: Dict[str, Any]) -> Dict[str, Any]:
                     exported.append(f"{language}/lda_doc_topic.csv")
                 if "lda_coherence" in selected:
                     with open(os.path.join(language_dir, "lda_coherence.json"), "w", encoding="utf-8") as file:
-                        json.dump({"language": language, "coherence_c_v": values["coherence"]}, file, ensure_ascii=False, indent=2)
+                        json.dump(
+                            {"language": language, "coherence_c_v": _number(values["coherence"])},
+                            file, ensure_ascii=False, indent=2,
+                        )
                     exported.append(f"{language}/lda_coherence.json")
             except Exception as exc:
                 for key in sorted(selected & lda_keys):
@@ -925,7 +984,7 @@ def main() -> int:
             error["code"] = "INVALID_DOCUMENT_TABLE"
             error["issues"] = exc.issues
         result = {"ok": False, "error": error, "state": _state_snapshot()}
-    sys.stdout.write(json.dumps(result, ensure_ascii=False))
+    sys.stdout.write(json.dumps(_json_safe(result), ensure_ascii=False))
     return 0 if result.get("ok") else 1
 
 

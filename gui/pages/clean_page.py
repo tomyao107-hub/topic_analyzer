@@ -407,6 +407,14 @@ class CleanPage(QWidget):
             QMessageBox.warning(self, "提示", "请先导入并合并数据")
             return
 
+        if "text" not in state.merged_df.columns:
+            QMessageBox.warning(
+                self, "缺少正文列",
+                "合并后的数据缺少 text（正文）列，无法清洗。\n"
+                "请返回导入页确认文本表的正文列已被正确识别或手动映射后重新合并。",
+            )
+            return
+
         self._apply_stopwords_edit()
 
         texts = state.merged_df["text"].fillna("").tolist()

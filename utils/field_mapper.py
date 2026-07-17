@@ -197,9 +197,10 @@ def parse_document_date(df: pd.DataFrame) -> pd.DataFrame:
         if "date" in df.columns:
             parsed = pd.to_datetime(df["date"], errors="coerce")
             if "year" not in df.columns:
-                df["year"] = parsed.dt.year
+                # 使用可空整数，避免派生列出现 1920.0 这类浮点展示。
+                df["year"] = parsed.dt.year.astype("Int64")
             if "month" not in df.columns:
-                df["month"] = parsed.dt.month
+                df["month"] = parsed.dt.month.astype("Int64")
         if "time_index" not in df.columns and "year" in df.columns and "month" in df.columns:
             years = pd.to_numeric(df["year"], errors="coerce")
             months = pd.to_numeric(df["month"], errors="coerce")

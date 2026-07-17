@@ -12,6 +12,11 @@ PUNCT_PATTERN = re.compile(
     r'''[，。！？、；：“”‘’（）《》【】—…·「」『』〔〕〖〗,\.!?;:"'()\[\]{}_@#$%^&*+=<>/\\|~`]'''
 )
 NUMBER_PATTERN = re.compile(r"\d+")
+# 英文标点清洗：故意不含撇号（' 及弯引号 ‘’），以便 don't / workers' 等
+# 词内撇号存活到分词阶段，由 _tokenize_english 统一归一化并裁剪外围撇号。
+ENGLISH_PUNCT_PATTERN = re.compile(
+    r'''[，。！？、；：“”（）《》【】—…·「」『』〔〕〖〗,\.!?;:"()\[\]{}_@#$%^&*+=<>/\\|~`]'''
+)
 ENGLISH_LINEBREAK_HYPHEN = re.compile(r"(?<=[A-Za-zÀ-ÖØ-öø-ÿ])-\s*\r?\n\s*(?=[A-Za-zÀ-ÖØ-öø-ÿ])")
 UNICODE_WORD_PATTERN = re.compile(r"[^\W\d_]+(?:[-'’][^\W\d_]+)*", re.UNICODE)
 
@@ -66,7 +71,7 @@ def clean_text(text: str, opts: CleanOptions, language: str = "zh") -> str:
         if language == "zh":
             result = PUNCT_PATTERN.sub(" ", result)
         else:
-            result = re.sub(r'''[，。！？、；：“”‘’（）《》【】—…·「」『』〔〕〖〗,\.!?;:"()\[\]{}_@#$%^&*+=<>/\\|~`]''', " ", result)
+            result = ENGLISH_PUNCT_PATTERN.sub(" ", result)
     if opts.remove_numbers:
         result = NUMBER_PATTERN.sub(" ", result)
     return re.sub(r"\s+", " ", result).strip()

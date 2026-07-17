@@ -151,7 +151,12 @@ def load_file(path: str) -> pd.DataFrame:
     """
     ext = os.path.splitext(path)[1].lower()
     if ext in (".xlsx", ".xls"):
-        excel_file = pd.ExcelFile(path)
+        try:
+            excel_file = pd.ExcelFile(path)
+        except FileNotFoundError:
+            raise ValueError(f"找不到文件：{path}")
+        except Exception as exc:
+            raise ValueError(f"无法读取 Excel 文件：{path}（{exc}）")
         sheet_names = excel_file.sheet_names
         logger.info(f"Excel 工作表：{sheet_names}")
         if not sheet_names:
@@ -160,6 +165,7 @@ def load_file(path: str) -> pd.DataFrame:
         df = pd.read_excel(excel_file, sheet_name=sheet_names[0], dtype=str)
         _log_dataframe_diagnostics(df, path, f"Excel工作表“{sheet_names[0]}”")
     elif ext == ".csv":
+        df = None
         for enc in ("utf-8-sig", "utf-8", "gbk", "gb18030", "big5"):
             try:
                 df = pd.read_csv(path, dtype=str, encoding=enc)
@@ -168,13 +174,21 @@ def load_file(path: str) -> pd.DataFrame:
                 break
             except UnicodeDecodeError:
                 continue
-        else:
+            except FileNotFoundError:
+                raise ValueError(f"找不到文件：{path}")
+            except pd.errors.EmptyDataError:
+                raise ValueError(f"CSV 文件为空或没有可解析的列：{path}")
+            except pd.errors.ParserError as exc:
+                raise ValueError(f"CSV 文件格式有误，无法解析：{path}（{exc}）")
+        if df is None:
             raise ValueError(f"无法解码文件：{path}，请另存为 UTF-8 CSV")
     else:
         raise ValueError(f"不支持的文件格式：{ext}，请使用 .csv 或 .xlsx")
 
     # 去除列名首尾空白
     df.columns = [str(c).strip() for c in df.columns]
+    if df.shape[1] == 0:
+        raise ValueError(f"文件中没有可识别的列：{path}")
     return df
 
 

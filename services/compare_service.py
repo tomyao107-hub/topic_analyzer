@@ -23,7 +23,8 @@ def build_topic_summary(df: pd.DataFrame, axis_field: str, topic_cols: List[str]
     work = df[[axis_field] + valid_topic_cols].dropna(subset=[axis_field]).copy()
     if work.empty:
         return pd.DataFrame()
-    if axis_field in ("year", "time_index"):
+    # v2 使用 year/time_index，v1 GUI 使用 pub_year；两者都应按数值轴排序。
+    if axis_field in ("year", "time_index", "pub_year", "pub_month", "month"):
         work[axis_field] = pd.to_numeric(work[axis_field], errors="coerce")
         work = work.dropna(subset=[axis_field])
         if work.empty:
